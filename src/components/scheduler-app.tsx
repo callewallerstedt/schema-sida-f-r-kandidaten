@@ -1349,6 +1349,32 @@ export function SchedulerApp() {
   return (
     <main className="scheduler-shell min-h-screen px-4 py-4 text-[var(--foreground)] md:px-6 md:py-6">
       <div className="mx-auto flex max-w-[1800px] flex-col gap-6">
+        <section className="rounded-[1rem] border border-white/60 bg-white/70 px-3 py-2 shadow-[0_14px_35px_rgba(15,23,42,0.08)] backdrop-blur-xl">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-slate-500">
+              Links
+            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <a
+                href="https://github.com/callewallerstedt/schema-sida-f-r-kandidaten"
+                target="_blank"
+                rel="noreferrer"
+                className="rounded-full border border-slate-300 bg-white px-3 py-1 text-[11px] font-medium text-slate-700 transition hover:border-slate-950 hover:text-slate-950"
+              >
+                Schedule repo
+              </a>
+              <a
+                href="https://github.com/callewallerstedt/LCC-Xgrids-to-PLY"
+                target="_blank"
+                rel="noreferrer"
+                className="rounded-full border border-slate-300 bg-white px-3 py-1 text-[11px] font-medium text-slate-700 transition hover:border-slate-950 hover:text-slate-950"
+              >
+                LCC Xgrids to PLY
+              </a>
+            </div>
+          </div>
+        </section>
+
         <section className="overflow-hidden rounded-[1.4rem] border border-white/60 bg-white/76 p-4 shadow-[0_24px_70px_rgba(15,23,42,0.14)] backdrop-blur-xl">
           <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
             <div className="max-w-3xl">
