@@ -51,6 +51,7 @@ type EditorState = {
   mode: "create" | "edit";
   draft: BookingDraft;
   bookingId?: string;
+  bookingIds?: string[];
   selectedComputerIds?: string[];
   fullRoom?: boolean;
 };
@@ -67,8 +68,11 @@ type CreateDragState = {
 type ResizeDragState = {
   kind: "resize";
   bookingId: string;
+  bookingIds: string[];
   computerId: string;
   date: string;
+  bookingSeriesId: string | null;
+  isFullRoom: boolean;
   edge: "start" | "end";
   laneTop: number;
   laneHeight: number;
@@ -83,6 +87,23 @@ type ViewStorage = {
   lastGroupId?: string;
   filteredComputerIds?: string[];
 };
+
+type FullRoomDisplayBooking = {
+  key: string;
+  booking: Booking;
+  bookingIds: string[];
+  computerIds: string[];
+  startColumn: number;
+  endColumn: number;
+};
+
+function normalizeBooking(booking: Booking) {
+  return {
+    ...booking,
+    bookingSeriesId: booking.bookingSeriesId ?? null,
+    isFullRoom: booking.isFullRoom ?? false,
+  };
+}
 
 function loadInitialState() {
   const fallbackWeekStart = getInitialWeekStart();
@@ -332,7 +353,7 @@ export function SchedulerApp() {
         }>(sessionsResponse);
 
         if (!cancelled) {
-          setBookings(bookingsBody.bookings);
+          setBookings(bookingsBody.bookings.map(normalizeBooking));
           setTimeSessions(sessionsBody.sessions);
         }
       } catch (error) {
@@ -448,12 +469,14 @@ export function SchedulerApp() {
           mode: "create",
           draft: {
             computerId: visibleComputers[0]?.id ?? computers[0]?.id ?? "",
+            bookingSeriesId: null,
             groupId: activeGroupRef.current,
             title: "",
             date: current.date,
             startMinutes,
             endMinutes,
             repeatWeekly: false,
+            isFullRoom: false,
           },
           selectedComputerIds:
             visibleComputers.length === 1 ? [visibleComputers[0].id] : [],
@@ -488,7 +511,28 @@ export function SchedulerApp() {
         return;
       }
 
-      if (hasOverlap(bookingsRef.current, nextBooking, current.bookingId)) {
+      const relatedBookings = bookingsRef.current.filter((entry) =>
+        current.bookingIds.includes(entry.id),
+      );
+      const conflictIds = current.bookingIds.length > 0
+        ? current.bookingIds
+        : current.bookingId;
+      const overlaps = (relatedBookings.length > 0 ? relatedBookings : [booking]).some(
+        (entry) =>
+          hasOverlap(
+            bookingsRef.current,
+            {
+              computerId: entry.computerId,
+              date: nextBooking.date,
+              startMinutes: nextBooking.startMinutes,
+              endMinutes: nextBooking.endMinutes,
+              repeatWeekly: nextBooking.repeatWeekly,
+            },
+            conflictIds,
+          ),
+      );
+
+      if (overlaps) {
         setToast("That resize would overlap another booking.");
         setDragState(null);
         return;
@@ -502,22 +546,27 @@ export function SchedulerApp() {
               "Content-Type": "application/json",
             },
             body: JSON.stringify({
-              id: current.bookingId,
+              ids: current.bookingIds,
               booking: {
                 computerId: nextBooking.computerId,
+                bookingSeriesId: nextBooking.bookingSeriesId,
                 groupId: nextBooking.groupId,
                 title: nextBooking.title,
                 date: nextBooking.date,
                 startMinutes: nextBooking.startMinutes,
                 endMinutes: nextBooking.endMinutes,
                 repeatWeekly: nextBooking.repeatWeekly,
+                isFullRoom: current.isFullRoom,
               },
             }),
           });
-          const body = await parseJsonResponse<{ booking: Booking }>(response);
+          const body = await parseJsonResponse<{ bookings: Booking[] }>(response);
+          const updatedById = new Map(
+            body.bookings.map(normalizeBooking).map((entry) => [entry.id, entry]),
+          );
           setBookings((currentBookings) =>
             currentBookings.map((entry) =>
-              entry.id === current.bookingId ? body.booking : entry,
+              updatedById.get(entry.id) ?? entry,
             ),
           );
         } catch (error) {
@@ -556,6 +605,7 @@ export function SchedulerApp() {
       .filter((booking) => occursThisWeek(booking, weekDays))
       .map((booking) => materializeBookingForWeek(booking, weekDays))
       .filter((booking): booking is Booking => booking !== null)
+      .map(normalizeBooking)
       .sort((left, right) => {
         if (left.date === right.date) {
           return left.startMinutes - right.startMinutes;
@@ -573,6 +623,9 @@ export function SchedulerApp() {
     const map = new Map<string, Booking[]>();
 
     for (const booking of weekBookings) {
+      if (booking.isFullRoom && booking.bookingSeriesId) {
+        continue;
+      }
       const key = `${booking.computerId}:${booking.date}`;
       const laneBookings = map.get(key) ?? [];
       laneBookings.push(booking);
@@ -585,6 +638,83 @@ export function SchedulerApp() {
 
     return map;
   }, [weekBookings]);
+
+  const bookingMinutesByLane = useMemo(() => {
+    const map = new Map<string, number>();
+
+    for (const booking of weekBookings) {
+      const key = `${booking.computerId}:${booking.date}`;
+      map.set(key, (map.get(key) ?? 0) + bookingDuration(booking));
+    }
+
+    return map;
+  }, [weekBookings]);
+
+  const fullRoomBookingsByDay = useMemo(() => {
+    const visibleIndexes = new Map(
+      visibleComputers.map((computer, index) => [computer.id, index]),
+    );
+    const grouped = new Map<
+      string,
+      {
+        booking: Booking;
+        bookingIds: string[];
+        computerIds: string[];
+      }
+    >();
+
+    for (const booking of weekBookings) {
+      if (!booking.isFullRoom || !booking.bookingSeriesId) {
+        continue;
+      }
+
+      const key = `${booking.bookingSeriesId}:${booking.date}`;
+      const current = grouped.get(key);
+      if (!current) {
+        grouped.set(key, {
+          booking,
+          bookingIds: [booking.id],
+          computerIds: [booking.computerId],
+        });
+        continue;
+      }
+
+      current.bookingIds.push(booking.id);
+      current.computerIds.push(booking.computerId);
+    }
+
+    const byDay = new Map<string, FullRoomDisplayBooking[]>();
+
+    for (const [key, value] of grouped.entries()) {
+      const visibleIds = value.computerIds
+        .map((computerId) => visibleIndexes.get(computerId))
+        .filter((index): index is number => index !== undefined)
+        .sort((left, right) => left - right);
+
+      if (visibleIds.length === 0) {
+        continue;
+      }
+
+      const dayBookings = byDay.get(value.booking.date) ?? [];
+      dayBookings.push({
+        key,
+        booking: value.booking,
+        bookingIds: value.bookingIds,
+        computerIds: value.computerIds,
+        startColumn: visibleIds[0],
+        endColumn: visibleIds[visibleIds.length - 1],
+      });
+      byDay.set(value.booking.date, dayBookings);
+    }
+
+    for (const bookingsForDay of byDay.values()) {
+      bookingsForDay.sort(
+        (left, right) => left.booking.startMinutes - right.booking.startMinutes,
+      );
+    }
+
+    return byDay;
+  }, [visibleComputers, weekBookings]);
 
   const normalizedTrackingUserId = trackingUserId.trim();
 
@@ -696,8 +826,32 @@ export function SchedulerApp() {
       return null;
     }
 
-    if (hasOverlap(bookings, editorState.draft, editorState.bookingId)) {
-      return "This booking overlaps another block on the same computer.";
+    const targetComputerIds =
+      editorState.fullRoom && (editorState.selectedComputerIds?.length ?? 0) > 0
+        ? editorState.selectedComputerIds ?? []
+        : [editorState.draft.computerId];
+    const ignoreIds =
+      editorState.bookingIds && editorState.bookingIds.length > 0
+        ? editorState.bookingIds
+        : editorState.bookingId;
+
+    const conflictingComputer = computers.find((computer) =>
+      targetComputerIds.includes(computer.id) &&
+      hasOverlap(
+        bookings,
+        {
+          computerId: computer.id,
+          date: editorState.draft.date,
+          startMinutes: editorState.draft.startMinutes,
+          endMinutes: editorState.draft.endMinutes,
+          repeatWeekly: editorState.draft.repeatWeekly,
+        },
+        ignoreIds,
+      ),
+    );
+
+    if (conflictingComputer) {
+      return `Booking conflicts on ${conflictingComputer.name}.`;
     }
 
     return null;
@@ -726,19 +880,31 @@ export function SchedulerApp() {
     });
   };
 
-  const openEditModal = (booking: Booking) => {
+  const openEditModal = (
+    booking: Booking,
+    options?: {
+      bookingIds?: string[];
+      computerIds?: string[];
+      fullRoom?: boolean;
+    },
+  ) => {
     setEditorState({
       mode: "edit",
       bookingId: booking.id,
+      bookingIds: options?.bookingIds ?? [booking.id],
       draft: {
         computerId: booking.computerId,
+        bookingSeriesId: booking.bookingSeriesId,
         groupId: booking.groupId,
         title: booking.title,
         date: booking.date,
         startMinutes: booking.startMinutes,
         endMinutes: booking.endMinutes,
         repeatWeekly: booking.repeatWeekly,
+        isFullRoom: options?.fullRoom ?? booking.isFullRoom,
       },
+      selectedComputerIds: options?.computerIds ?? [booking.computerId],
+      fullRoom: options?.fullRoom ?? booking.isFullRoom,
     });
   };
 
@@ -776,13 +942,17 @@ export function SchedulerApp() {
   const handleResizePointerDown = (
     event: ReactPointerEvent<HTMLButtonElement>,
     booking: Booking,
+    options: {
+      bookingIds?: string[];
+      fullRoom?: boolean;
+    },
     edge: "start" | "end",
   ) => {
     event.preventDefault();
     event.stopPropagation();
 
     const lane = event.currentTarget.closest(
-      "[data-lane='true']",
+      "[data-resize-surface='true']",
     ) as HTMLDivElement | null;
 
     if (!lane) {
@@ -794,8 +964,11 @@ export function SchedulerApp() {
     setDragState({
       kind: "resize",
       bookingId: booking.id,
+      bookingIds: options.bookingIds ?? [booking.id],
       computerId: booking.computerId,
       date: booking.date,
+      bookingSeriesId: booking.bookingSeriesId,
+      isFullRoom: options.fullRoom ?? booking.isFullRoom,
       edge,
       laneTop: rect.top,
       laneHeight: rect.height,
@@ -857,6 +1030,10 @@ export function SchedulerApp() {
       return {
         ...current,
         fullRoom: checked,
+        draft: {
+          ...current.draft,
+          isFullRoom: checked,
+        },
         selectedComputerIds: checked
           ? computers.map((computer) => computer.id)
           : current.selectedComputerIds ?? [],
@@ -873,34 +1050,43 @@ export function SchedulerApp() {
       body: JSON.stringify({ bookings: drafts }),
     });
     const body = await parseJsonResponse<{ bookings: Booking[] }>(response);
-    setBookings((currentBookings) => [...currentBookings, ...body.bookings]);
+    setBookings((currentBookings) => [
+      ...currentBookings,
+      ...body.bookings.map(normalizeBooking),
+    ]);
   };
 
-  const updateBooking = async (id: string, booking: BookingDraft) => {
+  const updateBooking = async (ids: string[], booking: BookingDraft) => {
     const response = await fetch("/api/bookings", {
       method: "PATCH",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ id, booking }),
+      body: JSON.stringify({ ids, booking }),
     });
-    const body = await parseJsonResponse<{ booking: Booking }>(response);
+    const body = await parseJsonResponse<{
+      bookings?: Booking[];
+      booking?: Booking;
+    }>(response);
+    const updatedBookings = (body.bookings ?? (body.booking ? [body.booking] : []))
+      .map(normalizeBooking);
+    const updatedById = new Map(updatedBookings.map((entry) => [entry.id, entry]));
     setBookings((currentBookings) =>
-      currentBookings.map((entry) => (entry.id === id ? body.booking : entry)),
+      currentBookings.map((entry) => updatedById.get(entry.id) ?? entry),
     );
   };
 
-  const removeBooking = async (id: string) => {
+  const removeBooking = async (ids: string[]) => {
     const response = await fetch("/api/bookings", {
       method: "DELETE",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ id }),
+      body: JSON.stringify({ ids }),
     });
     await parseJsonResponse<{ ok: boolean }>(response);
     setBookings((currentBookings) =>
-      currentBookings.filter((entry) => entry.id !== id),
+      currentBookings.filter((entry) => !ids.includes(entry.id)),
     );
   };
 
@@ -918,16 +1104,19 @@ export function SchedulerApp() {
         const targetComputerIds = editorState.fullRoom
           ? computers.map((computer) => computer.id)
           : Array.from(new Set(editorState.selectedComputerIds ?? []));
+        const bookingSeriesId = editorState.fullRoom ? crypto.randomUUID() : null;
 
         await createBookings(
           targetComputerIds.map((computerId) => ({
             ...editorState.draft,
             computerId,
+            bookingSeriesId,
             title,
+            isFullRoom: editorState.fullRoom ?? false,
           })),
         );
-      } else if (editorState.bookingId) {
-        await updateBooking(editorState.bookingId, {
+      } else if (editorState.bookingIds?.length) {
+        await updateBooking(editorState.bookingIds, {
           ...editorState.draft,
           title,
         });
@@ -942,9 +1131,9 @@ export function SchedulerApp() {
     }
   };
 
-  const deleteBooking = async (bookingId: string) => {
+  const deleteBooking = async (bookingIds: string[]) => {
     try {
-      await removeBooking(bookingId);
+      await removeBooking(bookingIds);
       setEditorState(null);
     } catch (error) {
       setToast(
@@ -1041,32 +1230,27 @@ export function SchedulerApp() {
   return (
     <main className="scheduler-shell min-h-screen px-4 py-4 text-[var(--foreground)] md:px-6 md:py-6">
       <div className="mx-auto flex max-w-[1800px] flex-col gap-6">
-        <section className="overflow-hidden rounded-[2rem] border border-white/60 bg-white/76 p-6 shadow-[0_35px_120px_rgba(15,23,42,0.18)] backdrop-blur-xl">
-          <div className="flex flex-col gap-6 xl:flex-row xl:items-start xl:justify-between">
+        <section className="overflow-hidden rounded-[1.4rem] border border-white/60 bg-white/76 p-4 shadow-[0_24px_70px_rgba(15,23,42,0.14)] backdrop-blur-xl">
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-center xl:justify-between">
             <div className="max-w-3xl">
-              <p className="text-xs font-semibold uppercase tracking-[0.38em] text-slate-500">
-                Computer booking board
+              <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-500">
+                Booking board
               </p>
-              <h1 className="mt-3 text-4xl font-semibold tracking-[-0.04em] text-slate-950 md:text-5xl">
-                Weekly scheduling for two working groups.
+              <h1 className="mt-1 text-xl font-semibold tracking-[-0.03em] text-slate-950 md:text-2xl">
+                Weekly computer schedule
               </h1>
-              <p className="mt-4 max-w-2xl text-sm leading-7 text-slate-600 md:text-base">
-                Drag directly in the grid to place time blocks, resize from the
-                edges, and keep Rita cellen and Fabriken coordinated across all
-                four machines.
+              <p className="mt-1 max-w-2xl text-[12px] leading-5 text-slate-600">
+                Drag to book. Full-room bookings span all computer columns.
               </p>
             </div>
 
-            <div className="grid gap-3 sm:grid-cols-3 xl:min-w-[520px]">
-              <article className="rounded-[1.5rem] border border-slate-200/70 bg-[linear-gradient(160deg,rgba(235,94,40,0.15),rgba(255,255,255,0.88))] p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.65)]">
+            <div className="grid gap-2 sm:grid-cols-3 xl:min-w-[460px]">
+              <article className="rounded-[1rem] border border-slate-200/70 bg-[linear-gradient(160deg,rgba(235,94,40,0.15),rgba(255,255,255,0.88))] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.65)]">
                 <p className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">
                   Total booked
                 </p>
-                <p className="mt-4 text-3xl font-semibold text-slate-950">
+                <p className="mt-2 text-2xl font-semibold text-slate-950">
                   {formatHours(weekSummary.totalMinutes)}
-                </p>
-                <p className="mt-2 text-sm text-slate-600">
-                  Planned usage this week.
                 </p>
               </article>
               {groups.map((group) => {
@@ -1079,7 +1263,7 @@ export function SchedulerApp() {
                 return (
                   <article
                     key={group.id}
-                    className="rounded-[1.5rem] border border-slate-200/70 p-4 shadow-[inset_0_1px_0_rgba(255,255,255,0.65)]"
+                    className="rounded-[1rem] border border-slate-200/70 p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.65)]"
                     style={{
                       background: `linear-gradient(160deg, ${group.surfaceColor}, rgba(255,255,255,0.92))`,
                     }}
@@ -1093,11 +1277,8 @@ export function SchedulerApp() {
                         {group.name}
                       </p>
                     </div>
-                    <p className="mt-4 text-3xl font-semibold text-slate-950">
+                    <p className="mt-2 text-2xl font-semibold text-slate-950">
                       {formatHours(groupTotals.groupMinutes)}
-                    </p>
-                    <p className="mt-2 text-sm text-slate-600">
-                      Planned machine time.
                     </p>
                   </article>
                 );
@@ -1105,43 +1286,43 @@ export function SchedulerApp() {
             </div>
           </div>
 
-          <div className="mt-6 flex flex-col gap-4 border-t border-slate-200/80 pt-5 lg:flex-row lg:items-center lg:justify-between">
-            <div className="flex flex-wrap items-center gap-3">
+          <div className="mt-4 flex flex-col gap-3 border-t border-slate-200/80 pt-3 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
                 onClick={() => shiftWeek(-1)}
-                className="rounded-full border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-950 hover:text-slate-950"
+                className="rounded-full border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:border-slate-950 hover:text-slate-950"
               >
-                Previous week
+                Prev
               </button>
               <button
                 type="button"
                 onClick={resetToCurrentWeek}
-                className="rounded-full border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-950 hover:text-slate-950"
+                className="rounded-full border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:border-slate-950 hover:text-slate-950"
               >
-                Current week
+                Today
               </button>
               <button
                 type="button"
                 onClick={() => shiftWeek(1)}
-                className="rounded-full border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-950 hover:text-slate-950"
+                className="rounded-full border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:border-slate-950 hover:text-slate-950"
               >
-                Next week
+                Next
               </button>
               <button
                 type="button"
                 onClick={() => setTrackingModalOpen(true)}
-                className="rounded-full border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-700 transition hover:border-slate-950 hover:text-slate-950"
+                className="rounded-full border border-slate-300 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:border-slate-950 hover:text-slate-950"
               >
                 {activeSessions.length > 0 ? "Check in/out • active" : "Check in/out"}
               </button>
             </div>
 
-            <div className="flex flex-col items-start gap-3 lg:items-end">
-              <div className="rounded-full border border-slate-200 bg-slate-950 px-4 py-2 text-xs font-medium text-white shadow-[0_12px_30px_rgba(15,23,42,0.2)]">
+            <div className="flex flex-col items-start gap-2 lg:items-end">
+              <div className="rounded-full border border-slate-200 bg-slate-950 px-3 py-1.5 text-[11px] font-medium text-white shadow-[0_12px_24px_rgba(15,23,42,0.18)]">
                 {formatWeekRange(weekStart)}
               </div>
-              <div className="flex flex-wrap items-center gap-3 text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
+              <div className="flex flex-wrap items-center gap-2 text-[11px] font-medium uppercase tracking-[0.14em] text-slate-500">
                 {groups.map((group) => (
                   <span key={group.id} className="flex items-center gap-2">
                     <span
@@ -1156,21 +1337,14 @@ export function SchedulerApp() {
           </div>
         </section>
 
-        <section className="overflow-hidden rounded-[2rem] border border-white/60 bg-white/82 shadow-[0_30px_100px_rgba(15,23,42,0.14)] backdrop-blur-xl">
-          <div className="border-b border-slate-200/80 px-6 py-5">
-            <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+        <section className="overflow-hidden rounded-[1.4rem] border border-white/60 bg-white/82 shadow-[0_24px_70px_rgba(15,23,42,0.12)] backdrop-blur-xl">
+          <div className="border-b border-slate-200/80 px-4 py-3">
+            <div className="flex flex-col gap-1 md:flex-row md:items-center md:justify-between">
               <div>
-                <p className="text-sm font-semibold uppercase tracking-[0.22em] text-slate-500">
-                  Weekly planner
-                </p>
-                <h2 className="mt-2 text-2xl font-semibold tracking-[-0.03em] text-slate-950">
-                  Computer availability and time tracking
-                </h2>
+                <p className="text-sm font-semibold text-slate-950">Weekly planner</p>
               </div>
-              <p className="max-w-2xl text-sm leading-6 text-slate-600">
-                Drag in any day lane to create a booking. The board blocks
-                overlaps on the same computer, and weekly totals update
-                automatically from the planned hours.
+              <p className="max-w-2xl text-[11px] leading-5 text-slate-500">
+                08:00-17:00 planned schedule. After hours are first come, first served.
               </p>
             </div>
           </div>
@@ -1219,129 +1393,278 @@ export function SchedulerApp() {
                     : null;
 
                 const dayTotal = visibleComputers.reduce((total, computer) => {
-                  return (
-                    total +
-                    (bookingsByLane.get(`${computer.id}:${day}`) ?? []).reduce(
-                      (laneTotal, booking) =>
-                        laneTotal + bookingDuration(booking),
-                      0,
-                    )
-                  );
+                  return total + (bookingMinutesByLane.get(`${computer.id}:${day}`) ?? 0);
                 }, 0);
+                const fullRoomBookings = fullRoomBookingsByDay.get(day) ?? [];
 
                 return (
                   <section
                     key={day}
-                    className="min-w-0 rounded-[1.2rem] border border-slate-200/80 bg-white/82 p-2 shadow-[0_14px_30px_rgba(15,23,42,0.08)]"
+                    className="min-w-0 rounded-[1rem] border border-slate-200/80 bg-white/88 p-1.5 shadow-[0_12px_24px_rgba(15,23,42,0.07)]"
                   >
-                    <div className="flex items-end justify-between gap-2 border-b border-slate-200/80 pb-2">
+                    <div className="flex items-end justify-between gap-2 border-b border-slate-200/80 px-1 pb-1.5">
                       <div>
-                        <p className="text-xs font-semibold text-slate-950">
+                        <p className="text-[11px] font-semibold text-slate-950">
                           {formatDayLabel(day)}
                         </p>
-                        <p className="mt-1 text-[10px] uppercase tracking-[0.18em] text-slate-500">
+                        <p className="mt-0.5 text-[9px] uppercase tracking-[0.16em] text-slate-500">
                           {formatHours(dayTotal)} booked
                         </p>
                       </div>
-                      <p className="text-[9px] uppercase tracking-[0.18em] text-slate-400">
-                        {visibleComputers.length} computer
-                        {visibleComputers.length === 1 ? "" : "s"} visible
+                      <p className="text-[8px] uppercase tracking-[0.16em] text-slate-400">
+                        {visibleComputers.length} shown
                       </p>
                     </div>
 
-                    <div
-                      className="mt-2.5 grid gap-1"
-                      style={{
-                        gridTemplateColumns: `repeat(${visibleComputers.length}, minmax(0, 1fr))`,
-                      }}
-                    >
-                      {visibleComputers.map((computer) => {
-                        const laneKey = `${computer.id}:${day}`;
-                        const laneBookings = bookingsByLane.get(laneKey) ?? [];
-                        const computerSurface = getComputerSurface(computer.id);
+                    <div className="relative mt-2">
+                      <div
+                        className="grid gap-1"
+                        style={{
+                          gridTemplateColumns: `repeat(${visibleComputers.length}, minmax(0, 1fr))`,
+                        }}
+                      >
+                        {visibleComputers.map((computer) => {
+                          const laneKey = `${computer.id}:${day}`;
+                          const laneMinutes = bookingMinutesByLane.get(laneKey) ?? 0;
+                          const computerSurface = getComputerSurface(computer.id);
 
-                        return (
-                          <div key={laneKey} className="flex min-w-0 flex-col gap-1">
+                          return (
                             <div
-                              className="rounded-[0.8rem] border px-1.5 py-1.5 text-center"
+                              key={`${laneKey}:header`}
+                              className="rounded-[0.7rem] border px-1 py-1 text-center"
                               style={{
                                 borderColor: computerSurface.border,
                                 background: computerSurface.background,
                               }}
                             >
-                              <p className="text-[9px] font-semibold uppercase tracking-[0.12em] text-slate-900">
+                              <p className="text-[8px] font-semibold uppercase tracking-[0.1em] text-slate-900">
                                 {getComputerLabel(computer.name)}
                               </p>
-                              <p className="mt-0.5 text-[8px] uppercase tracking-[0.12em] text-slate-500">
-                                {formatHours(
-                                  laneBookings.reduce(
-                                    (total, booking) =>
-                                      total + bookingDuration(booking),
-                                    0,
-                                  ),
-                                )}
+                              <p className="mt-0.5 text-[7px] uppercase tracking-[0.08em] text-slate-500">
+                                {formatHours(laneMinutes)}
                               </p>
                             </div>
+                          );
+                        })}
+                      </div>
 
-                            <div
-                              data-lane="true"
-                              onPointerDown={(event) =>
-                                handleLanePointerDown(event, day)
-                              }
-                              className="scheduler-lane relative overflow-hidden rounded-[1rem] border shadow-[inset_0_1px_0_rgba(255,255,255,0.7)] select-none"
-                              style={{
-                                height: `${LANE_HEIGHT}px`,
-                                borderColor: computerSurface.border,
-                                background: computerSurface.background,
-                              }}
-                            >
-                              <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.52),transparent_28%,transparent_72%,rgba(15,23,42,0.03))]" />
-                              {VISIBLE_HOUR_MARKERS.map((hour) => (
-                                <span
-                                  key={hour}
-                                  className="pointer-events-none absolute left-1 z-[1] rounded-full bg-white/85 px-1 py-0.5 text-[7px] font-semibold uppercase tracking-[0.1em] text-slate-400"
-                                  style={{
-                                    top: `${((hour * 60 - SCHEDULE_START_MINUTES) / (SCHEDULE_END_MINUTES - SCHEDULE_START_MINUTES)) * 100}%`,
-                                    transform: "translateY(-50%)",
-                                  }}
-                                >
-                                  {minutesToTime(hour * 60)}
+                      <div
+                        className="mt-1 grid gap-1"
+                        style={{
+                          gridTemplateColumns: `repeat(${visibleComputers.length}, minmax(0, 1fr))`,
+                        }}
+                      >
+                        {visibleComputers.map((computer) => {
+                          const laneKey = `${computer.id}:${day}`;
+                          const laneBookings = bookingsByLane.get(laneKey) ?? [];
+                          const computerSurface = getComputerSurface(computer.id);
+
+                          return (
+                            <div key={laneKey}>
+                              <div
+                                data-lane="true"
+                                data-resize-surface="true"
+                                onPointerDown={(event) =>
+                                  handleLanePointerDown(event, day)
+                                }
+                                className="scheduler-lane relative overflow-hidden rounded-[0.85rem] border shadow-[inset_0_1px_0_rgba(255,255,255,0.7)] select-none"
+                                style={{
+                                  height: `${LANE_HEIGHT}px`,
+                                  borderColor: computerSurface.border,
+                                  background: computerSurface.background,
+                                }}
+                              >
+                                <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.52),transparent_28%,transparent_72%,rgba(15,23,42,0.03))]" />
+                                {VISIBLE_HOUR_MARKERS.map((hour) => (
+                                  <span
+                                    key={hour}
+                                    className="pointer-events-none absolute left-1 z-[1] rounded-full bg-white/85 px-1 py-0.5 text-[7px] font-semibold uppercase tracking-[0.1em] text-slate-400"
+                                    style={{
+                                      top: `${((hour * 60 - SCHEDULE_START_MINUTES) / (SCHEDULE_END_MINUTES - SCHEDULE_START_MINUTES)) * 100}%`,
+                                      transform: "translateY(-50%)",
+                                    }}
+                                  >
+                                    {minutesToTime(hour * 60)}
+                                  </span>
+                                ))}
+                                <span className="pointer-events-none absolute bottom-1.5 left-1 rounded-full bg-white/85 px-1 py-0.5 text-[7px] font-semibold uppercase tracking-[0.1em] text-slate-400">
+                                  17:00
                                 </span>
-                              ))}
-                              <span className="pointer-events-none absolute bottom-1.5 left-1 rounded-full bg-white/85 px-1 py-0.5 text-[7px] font-semibold uppercase tracking-[0.1em] text-slate-400">
-                                17:00
-                              </span>
 
-                              {laneBookings.map((booking) => {
-                                const isResizing =
-                                  dragState?.kind === "resize" &&
-                                  dragState.bookingId === booking.id;
-                                const renderedBooking = isResizing
-                                  ? {
-                                      ...booking,
-                                      startMinutes: dragState.currentStart,
-                                      endMinutes: dragState.currentEnd,
-                                    }
-                                  : booking;
-                                const group = getGroup(renderedBooking.groupId);
-                                const isCompact =
-                                  renderedBooking.endMinutes -
-                                    renderedBooking.startMinutes <
-                                  60;
+                                {laneBookings.map((booking) => {
+                                  const isResizing =
+                                    dragState?.kind === "resize" &&
+                                    dragState.bookingId === booking.id;
+                                  const renderedBooking = isResizing
+                                    ? {
+                                        ...booking,
+                                        startMinutes: dragState.currentStart,
+                                        endMinutes: dragState.currentEnd,
+                                      }
+                                    : booking;
+                                  const group = getGroup(renderedBooking.groupId);
+                                  const isCompact =
+                                    renderedBooking.endMinutes -
+                                      renderedBooking.startMinutes <
+                                    60;
 
-                                return (
+                                  return (
+                                    <div
+                                      key={booking.id}
+                                      data-booking-action="true"
+                                      onClick={() => openEditModal(booking)}
+                                      className="absolute left-0.5 right-0.5 z-[2] cursor-pointer rounded-[0.6rem] border px-1 pb-1 pt-2 shadow-[0_8px_16px_rgba(15,23,42,0.12)] transition hover:translate-y-[-1px] hover:shadow-[0_10px_20px_rgba(15,23,42,0.16)]"
+                                      style={{
+                                        ...getBlockStyle(
+                                          renderedBooking.startMinutes,
+                                          renderedBooking.endMinutes,
+                                        ),
+                                        borderColor: group.color,
+                                        background: `linear-gradient(180deg, ${group.surfaceColor}, rgba(255,255,255,0.94))`,
+                                      }}
+                                    >
+                                      <button
+                                        type="button"
+                                        aria-label="Resize start"
+                                        data-booking-action="true"
+                                        onPointerDown={(event) =>
+                                          handleResizePointerDown(
+                                            event,
+                                            booking,
+                                            {
+                                              bookingIds: [booking.id],
+                                              fullRoom: false,
+                                            },
+                                            "start",
+                                          )
+                                        }
+                                        className="absolute inset-x-0 top-0 h-2.5 cursor-row-resize rounded-t-[0.6rem]"
+                                      />
+                                      <button
+                                        type="button"
+                                        aria-label="Resize end"
+                                        data-booking-action="true"
+                                        onPointerDown={(event) =>
+                                          handleResizePointerDown(
+                                            event,
+                                            booking,
+                                            {
+                                              bookingIds: [booking.id],
+                                              fullRoom: false,
+                                            },
+                                            "end",
+                                          )
+                                        }
+                                        className="absolute inset-x-0 bottom-0 h-2.5 cursor-row-resize rounded-b-[0.6rem]"
+                                      />
+
+                                      <div className="flex items-start justify-between gap-1.5">
+                                        <div className="min-w-0">
+                                          <p
+                                            className={`break-words font-semibold leading-tight tracking-[-0.02em] text-slate-950 ${isCompact ? "text-[7px]" : "text-[8px]"}`}
+                                          >
+                                            {renderedBooking.title}
+                                          </p>
+                                        </div>
+                                        <span
+                                          className="mt-0.5 h-2 w-2 shrink-0 rounded-full"
+                                          style={{ backgroundColor: group.color }}
+                                        />
+                                      </div>
+
+                                      <p
+                                        className={`mt-0.5 font-medium text-slate-700 ${isCompact ? "text-[7px]" : "text-[8px]"}`}
+                                      >
+                                        {minutesToTime(renderedBooking.startMinutes)} -{" "}
+                                        {minutesToTime(renderedBooking.endMinutes)}
+                                      </p>
+                                    </div>
+                                  );
+                                })}
+
+                                {activeCreateBooking &&
+                                activeCreateBooking.endMinutes -
+                                  activeCreateBooking.startMinutes >=
+                                  MIN_BOOKING_MINUTES ? (
                                   <div
-                                    key={booking.id}
-                                    data-booking-action="true"
-                                    onClick={() => openEditModal(booking)}
-                                    className="absolute left-0.5 right-0.5 z-[2] cursor-pointer rounded-[0.75rem] border px-1 pb-1 pt-2.5 shadow-[0_8px_18px_rgba(15,23,42,0.14)] transition hover:translate-y-[-1px] hover:shadow-[0_12px_22px_rgba(15,23,42,0.18)]"
+                                    className="absolute left-0.5 right-0.5 z-[1] rounded-[0.75rem] border border-dashed opacity-80"
                                     style={{
                                       ...getBlockStyle(
-                                        renderedBooking.startMinutes,
-                                        renderedBooking.endMinutes,
+                                        activeCreateBooking.startMinutes,
+                                        activeCreateBooking.endMinutes,
                                       ),
+                                      borderColor: getGroup(
+                                        activeCreateBooking.groupId,
+                                      ).color,
+                                      background: getGroup(
+                                        activeCreateBooking.groupId,
+                                      ).surfaceColor,
+                                    }}
+                                  />
+                                ) : null}
+
+                                {laneBookings.length === 0 && !activeCreateBooking ? (
+                                  <div className="pointer-events-none absolute inset-x-0.5 bottom-1.5 rounded-full border border-dashed border-slate-200 bg-white/70 px-1 py-0.5 text-center text-[7px] font-medium uppercase tracking-[0.1em] text-slate-400">
+                                    Drag
+                                  </div>
+                                ) : null}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {fullRoomBookings.length > 0 ? (
+                        <div
+                          data-resize-surface="true"
+                          className="pointer-events-none absolute inset-x-0 bottom-0 top-[2.15rem] z-[4]"
+                        >
+                          {fullRoomBookings.map((displayBooking) => {
+                            const isResizing =
+                              dragState?.kind === "resize" &&
+                              displayBooking.bookingIds.includes(dragState.bookingId);
+                            const renderedBooking = isResizing
+                              ? {
+                                  ...displayBooking.booking,
+                                  startMinutes: dragState.currentStart,
+                                  endMinutes: dragState.currentEnd,
+                                }
+                              : displayBooking.booking;
+                            const group = getGroup(renderedBooking.groupId);
+                            const isCompact =
+                              renderedBooking.endMinutes -
+                                renderedBooking.startMinutes <
+                              60;
+
+                            return (
+                              <div
+                                key={displayBooking.key}
+                                className="absolute inset-x-0"
+                                style={getBlockStyle(
+                                  renderedBooking.startMinutes,
+                                  renderedBooking.endMinutes,
+                                )}
+                              >
+                                <div
+                                  className="grid h-full gap-1"
+                                  style={{
+                                    gridTemplateColumns: `repeat(${visibleComputers.length}, minmax(0, 1fr))`,
+                                  }}
+                                >
+                                  <div
+                                    data-booking-action="true"
+                                    onClick={() =>
+                                      openEditModal(displayBooking.booking, {
+                                        bookingIds: displayBooking.bookingIds,
+                                        computerIds: displayBooking.computerIds,
+                                        fullRoom: true,
+                                      })
+                                    }
+                                    className="pointer-events-auto relative cursor-pointer rounded-[0.7rem] border px-1.5 pb-1 pt-2 shadow-[0_10px_22px_rgba(15,23,42,0.18)] transition hover:translate-y-[-1px]"
+                                    style={{
+                                      gridColumn: `${displayBooking.startColumn + 1} / ${displayBooking.endColumn + 2}`,
                                       borderColor: group.color,
-                                      background: `linear-gradient(180deg, ${group.surfaceColor}, rgba(255,255,255,0.94))`,
+                                      background: `linear-gradient(180deg, ${group.surfaceColor}, rgba(255,255,255,0.98))`,
                                     }}
                                   >
                                     <button
@@ -1351,11 +1674,15 @@ export function SchedulerApp() {
                                       onPointerDown={(event) =>
                                         handleResizePointerDown(
                                           event,
-                                          booking,
+                                          displayBooking.booking,
+                                          {
+                                            bookingIds: displayBooking.bookingIds,
+                                            fullRoom: true,
+                                          },
                                           "start",
                                         )
                                       }
-                                      className="absolute inset-x-0 top-0 h-2.5 cursor-row-resize rounded-t-[0.75rem]"
+                                      className="absolute inset-x-0 top-0 h-2.5 cursor-row-resize rounded-t-[0.7rem]"
                                     />
                                     <button
                                       type="button"
@@ -1364,19 +1691,25 @@ export function SchedulerApp() {
                                       onPointerDown={(event) =>
                                         handleResizePointerDown(
                                           event,
-                                          booking,
+                                          displayBooking.booking,
+                                          {
+                                            bookingIds: displayBooking.bookingIds,
+                                            fullRoom: true,
+                                          },
                                           "end",
                                         )
                                       }
-                                      className="absolute inset-x-0 bottom-0 h-2.5 cursor-row-resize rounded-b-[0.75rem]"
-                                      />
-
-                                    <div className="flex items-start justify-between gap-1.5">
+                                      className="absolute inset-x-0 bottom-0 h-2.5 cursor-row-resize rounded-b-[0.7rem]"
+                                    />
+                                    <div className="flex items-start justify-between gap-2">
                                       <div className="min-w-0">
                                         <p
-                                          className={`truncate font-semibold tracking-[-0.02em] text-slate-950 ${isCompact ? "text-[8px]" : "text-[9px]"}`}
+                                          className={`break-words font-semibold leading-tight text-slate-950 ${isCompact ? "text-[8px]" : "text-[9px]"}`}
                                         >
                                           {renderedBooking.title}
+                                        </p>
+                                        <p className="mt-0.5 text-[7px] font-medium uppercase tracking-[0.12em] text-slate-600">
+                                          Full room
                                         </p>
                                       </div>
                                       <span
@@ -1384,50 +1717,17 @@ export function SchedulerApp() {
                                         style={{ backgroundColor: group.color }}
                                       />
                                     </div>
-
-                                    <p
-                                      className={`mt-0.5 font-medium text-slate-700 ${isCompact ? "text-[7px]" : "text-[8px]"}`}
-                                    >
-                                      {minutesToTime(
-                                        renderedBooking.startMinutes,
-                                      )}{" "}
-                                      -{" "}
+                                    <p className="mt-0.5 text-[8px] font-medium text-slate-700">
+                                      {minutesToTime(renderedBooking.startMinutes)} -{" "}
                                       {minutesToTime(renderedBooking.endMinutes)}
                                     </p>
                                   </div>
-                                );
-                              })}
-
-                              {activeCreateBooking &&
-                              activeCreateBooking.endMinutes -
-                                activeCreateBooking.startMinutes >=
-                                MIN_BOOKING_MINUTES ? (
-                                <div
-                                  className="absolute left-0.5 right-0.5 z-[1] rounded-[0.75rem] border border-dashed opacity-80"
-                                  style={{
-                                    ...getBlockStyle(
-                                      activeCreateBooking.startMinutes,
-                                      activeCreateBooking.endMinutes,
-                                    ),
-                                    borderColor: getGroup(
-                                      activeCreateBooking.groupId,
-                                    ).color,
-                                    background: getGroup(
-                                      activeCreateBooking.groupId,
-                                    ).surfaceColor,
-                                  }}
-                                />
-                              ) : null}
-
-                              {laneBookings.length === 0 && !activeCreateBooking ? (
-                                <div className="pointer-events-none absolute inset-x-0.5 bottom-1.5 rounded-full border border-dashed border-slate-200 bg-white/70 px-1 py-1 text-center text-[7px] font-medium uppercase tracking-[0.1em] text-slate-400">
-                                  Drag
                                 </div>
-                              ) : null}
-                            </div>
-                          </div>
-                        );
-                      })}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : null}
                     </div>
                   </section>
                 );
@@ -1445,7 +1745,7 @@ export function SchedulerApp() {
 
       {trackingModalOpen ? (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/35 p-4 backdrop-blur-sm">
-          <div className="w-full max-w-2xl rounded-[2rem] border border-white/70 bg-white p-6 shadow-[0_40px_120px_rgba(15,23,42,0.28)]">
+          <div className="max-h-[calc(100vh-2rem)] w-full max-w-2xl overflow-y-auto rounded-[1.4rem] border border-white/70 bg-white p-4 shadow-[0_40px_120px_rgba(15,23,42,0.28)]">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">
@@ -1461,13 +1761,13 @@ export function SchedulerApp() {
               <button
                 type="button"
                 onClick={() => setTrackingModalOpen(false)}
-                className="rounded-full border border-slate-300 px-3 py-2 text-sm font-medium text-slate-600 transition hover:border-slate-950 hover:text-slate-950"
+                className="rounded-full border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-600 transition hover:border-slate-950 hover:text-slate-950"
               >
                 Close
               </button>
             </div>
 
-            <div className="mt-6 grid gap-4">
+            <div className="mt-4 grid gap-3">
               <div className="grid gap-3 md:grid-cols-[1fr_auto]">
                 <label className="grid gap-2">
                   <span className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
@@ -1478,7 +1778,7 @@ export function SchedulerApp() {
                     value={trackingUserId}
                     onChange={(event) => setTrackingUserId(event.target.value)}
                     placeholder="example: user-1024"
-                    className="rounded-2xl border border-slate-300 bg-slate-50 px-4 py-3 text-base text-slate-950 outline-none transition focus:border-slate-950"
+                    className="rounded-[1rem] border border-slate-300 bg-slate-50 px-3 py-2.5 text-base text-slate-950 outline-none transition focus:border-slate-950"
                   />
                 </label>
                 <div className="flex items-end">
@@ -1486,7 +1786,7 @@ export function SchedulerApp() {
                     <button
                       type="button"
                       onClick={handleCheckOut}
-                      className="w-full rounded-full bg-slate-950 px-5 py-3 text-sm font-medium text-white shadow-[0_12px_24px_rgba(15,23,42,0.25)] transition hover:translate-y-[-1px] hover:shadow-[0_16px_30px_rgba(15,23,42,0.28)]"
+                      className="w-full rounded-full bg-slate-950 px-4 py-2.5 text-sm font-medium text-white shadow-[0_12px_24px_rgba(15,23,42,0.25)] transition hover:translate-y-[-1px] hover:shadow-[0_16px_30px_rgba(15,23,42,0.28)]"
                     >
                       Check out
                     </button>
@@ -1494,7 +1794,7 @@ export function SchedulerApp() {
                     <button
                       type="button"
                       onClick={handleCheckIn}
-                      className="w-full rounded-full bg-slate-950 px-5 py-3 text-sm font-medium text-white shadow-[0_12px_24px_rgba(15,23,42,0.25)] transition hover:translate-y-[-1px] hover:shadow-[0_16px_30px_rgba(15,23,42,0.28)]"
+                      className="w-full rounded-full bg-slate-950 px-4 py-2.5 text-sm font-medium text-white shadow-[0_12px_24px_rgba(15,23,42,0.25)] transition hover:translate-y-[-1px] hover:shadow-[0_16px_30px_rgba(15,23,42,0.28)]"
                     >
                       Check in
                     </button>
@@ -1503,7 +1803,7 @@ export function SchedulerApp() {
               </div>
 
               {activeSessionForUser ? (
-                <div className="rounded-[1.4rem] border border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-600">
+                <div className="rounded-[1rem] border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-600">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
                       <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
@@ -1531,14 +1831,14 @@ export function SchedulerApp() {
                       onChange={(event) => setCheckoutNote(event.target.value)}
                       rows={3}
                       placeholder="Short description of what you did"
-                      className="rounded-2xl border border-slate-300 bg-white px-4 py-3 text-sm text-slate-950 outline-none transition focus:border-slate-950"
+                      className="rounded-[1rem] border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-950 outline-none transition focus:border-slate-950"
                     />
                   </label>
                 </div>
               ) : null}
 
               <div className="grid gap-4 md:grid-cols-2">
-                <div className="rounded-[1.4rem] border border-slate-200 bg-slate-50 px-4 py-4">
+                <div className="rounded-[1rem] border border-slate-200 bg-slate-50 px-3 py-3">
                   <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
                     User totals
                   </p>
@@ -1549,7 +1849,7 @@ export function SchedulerApp() {
                       timeTotalsByUser.slice(0, 6).map((entry) => (
                         <div
                           key={entry.userId}
-                          className="flex items-center justify-between rounded-[1rem] border border-slate-200 bg-white px-3 py-3"
+                          className="flex items-center justify-between gap-3 rounded-[0.9rem] border border-slate-200 bg-white px-3 py-2.5"
                         >
                           <div>
                             <p className="text-sm font-semibold text-slate-950">
@@ -1569,7 +1869,7 @@ export function SchedulerApp() {
                   </div>
                 </div>
 
-                <div className="rounded-[1.4rem] border border-slate-200 bg-slate-50 px-4 py-4">
+                <div className="rounded-[1rem] border border-slate-200 bg-slate-50 px-3 py-3">
                   <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
                     Recent activity
                   </p>
@@ -1580,7 +1880,7 @@ export function SchedulerApp() {
                       recentSessions.map((session) => (
                         <div
                           key={session.id}
-                          className="rounded-[1rem] border border-slate-200 bg-white px-3 py-3 text-sm text-slate-600"
+                          className="rounded-[0.9rem] border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-600"
                         >
                           <div className="flex items-center justify-between gap-3">
                             <p className="font-semibold text-slate-950">
@@ -1617,7 +1917,7 @@ export function SchedulerApp() {
 
       {editorState ? (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/35 p-4 backdrop-blur-sm">
-          <div className="w-full max-w-xl rounded-[2rem] border border-white/70 bg-white p-6 shadow-[0_40px_120px_rgba(15,23,42,0.28)]">
+          <div className="max-h-[calc(100vh-2rem)] w-full max-w-xl overflow-y-auto rounded-[1.4rem] border border-white/70 bg-white p-4 shadow-[0_40px_120px_rgba(15,23,42,0.28)]">
             <div className="flex items-start justify-between gap-4">
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.24em] text-slate-500">
@@ -1625,27 +1925,29 @@ export function SchedulerApp() {
                     ? "Create booking"
                     : "Edit booking"}
                 </p>
-                <h3 className="mt-2 text-2xl font-semibold tracking-[-0.03em] text-slate-950">
+                <h3 className="mt-1 text-xl font-semibold tracking-[-0.03em] text-slate-950">
                   {editorState.mode === "create"
                     ? "Choose computers"
-                    : (computers.find(
-                        (computer) =>
-                          computer.id === editorState.draft.computerId,
-                      )?.name ?? "Computer")}
+                    : editorState.fullRoom
+                      ? "Full room"
+                      : (computers.find(
+                          (computer) =>
+                            computer.id === editorState.draft.computerId,
+                        )?.name ?? "Computer")}
                 </h3>
-                <p className="mt-1 text-sm text-slate-600">
+                <p className="mt-1 text-xs text-slate-600">
                   {formatDayLabel(editorState.draft.date)}
                 </p>
               </div>
               <button
                 type="button"
                 onClick={() => setEditorState(null)}
-                className="rounded-full border border-slate-300 px-3 py-2 text-sm font-medium text-slate-600 transition hover:border-slate-950 hover:text-slate-950"
+                className="rounded-full border border-slate-300 px-3 py-1.5 text-sm font-medium text-slate-600 transition hover:border-slate-950 hover:text-slate-950"
               >
                 Close
               </button>
             </div>
-            <div className="mt-6 grid gap-5">
+            <div className="mt-4 grid gap-4">
               <label className="grid gap-2">
                 <span className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
                   Booking name
@@ -1657,12 +1959,12 @@ export function SchedulerApp() {
                     handleEditorChange("title", event.target.value)
                   }
                   placeholder="Example: Fabrication session"
-                  className="rounded-2xl border border-slate-300 bg-slate-50 px-4 py-3 text-base text-slate-950 outline-none transition focus:border-slate-950"
+                  className="rounded-[1rem] border border-slate-300 bg-slate-50 px-3 py-2.5 text-base text-slate-950 outline-none transition focus:border-slate-950"
                 />
               </label>
 
               <div
-                className={`grid gap-5 ${editorState.mode === "create" ? "md:grid-cols-4" : "md:grid-cols-3"}`}
+                className={`grid gap-4 ${editorState.mode === "create" ? "md:grid-cols-4" : "md:grid-cols-3"}`}
               >
                 {editorState.mode === "create" ? (
                   <label className="grid gap-2">
@@ -1674,7 +1976,7 @@ export function SchedulerApp() {
                       onChange={(event) =>
                         handleEditorChange("date", event.target.value)
                       }
-                      className="rounded-2xl border border-slate-300 bg-slate-50 px-4 py-3 text-base text-slate-950 outline-none transition focus:border-slate-950"
+                      className="rounded-[1rem] border border-slate-300 bg-slate-50 px-3 py-2.5 text-base text-slate-950 outline-none transition focus:border-slate-950"
                     >
                       {weekDays.map((day) => (
                         <option key={day} value={day}>
@@ -1694,7 +1996,7 @@ export function SchedulerApp() {
                     onChange={(event) =>
                       handleEditorChange("groupId", event.target.value)
                     }
-                    className="rounded-2xl border border-slate-300 bg-slate-50 px-4 py-3 text-base text-slate-950 outline-none transition focus:border-slate-950"
+                    className="rounded-[1rem] border border-slate-300 bg-slate-50 px-3 py-2.5 text-base text-slate-950 outline-none transition focus:border-slate-950"
                   >
                     {groups.map((group) => (
                       <option key={group.id} value={group.id}>
@@ -1716,7 +2018,7 @@ export function SchedulerApp() {
                         Number(event.target.value),
                       )
                     }
-                    className="rounded-2xl border border-slate-300 bg-slate-50 px-4 py-3 text-base text-slate-950 outline-none transition focus:border-slate-950"
+                    className="rounded-[1rem] border border-slate-300 bg-slate-50 px-3 py-2.5 text-base text-slate-950 outline-none transition focus:border-slate-950"
                   >
                     {TIME_OPTIONS.map((minutes) => (
                       <option key={minutes} value={minutes}>
@@ -1738,7 +2040,7 @@ export function SchedulerApp() {
                         Number(event.target.value),
                       )
                     }
-                    className="rounded-2xl border border-slate-300 bg-slate-50 px-4 py-3 text-base text-slate-950 outline-none transition focus:border-slate-950"
+                    className="rounded-[1rem] border border-slate-300 bg-slate-50 px-3 py-2.5 text-base text-slate-950 outline-none transition focus:border-slate-950"
                   >
                     {TIME_OPTIONS.map((minutes) => (
                       <option key={minutes} value={minutes}>
@@ -1750,7 +2052,7 @@ export function SchedulerApp() {
               </div>
 
               {editorState.mode === "create" ? (
-                <div className="rounded-[1.4rem] border border-slate-200 bg-slate-50 px-4 py-4">
+                <div className="rounded-[1rem] border border-slate-200 bg-slate-50 px-3 py-3">
                   <div className="flex flex-wrap items-center justify-between gap-3">
                     <div>
                       <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
@@ -1760,7 +2062,7 @@ export function SchedulerApp() {
                         Pick one or more computers, or book the full room.
                       </p>
                     </div>
-                    <label className="flex items-center gap-2 rounded-full border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700">
+                    <label className="flex items-center gap-2 rounded-full border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700">
                       <input
                         type="checkbox"
                         checked={editorState.fullRoom ?? false}
@@ -1773,7 +2075,7 @@ export function SchedulerApp() {
                     </label>
                   </div>
 
-                  <div className="mt-4 grid gap-2 sm:grid-cols-2">
+                  <div className="mt-3 grid gap-2 sm:grid-cols-2">
                     {computers.map((computer) => {
                       const checked = (editorState.fullRoom ?? false)
                         ? true
@@ -1784,7 +2086,7 @@ export function SchedulerApp() {
                       return (
                         <label
                           key={computer.id}
-                          className={`flex items-center justify-between rounded-[1rem] border px-3 py-3 text-sm transition ${(editorState.fullRoom ?? false) || checked ? "border-slate-950 bg-slate-950 text-white" : "border-slate-300 bg-white text-slate-700"}`}
+                          className={`flex items-center justify-between gap-3 rounded-[0.9rem] border px-3 py-2.5 text-sm transition ${(editorState.fullRoom ?? false) || checked ? "border-slate-950 bg-slate-950 text-white" : "border-slate-300 bg-white text-slate-700"}`}
                         >
                           <span>{computer.name}</span>
                           <input
@@ -1801,7 +2103,7 @@ export function SchedulerApp() {
                 </div>
               ) : null}
 
-              <div className="rounded-[1.4rem] border border-slate-200 bg-slate-50 px-4 py-4">
+                <div className="rounded-[1rem] border border-slate-200 bg-slate-50 px-3 py-3">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
@@ -1811,7 +2113,7 @@ export function SchedulerApp() {
                       Reuse this booking every week on the same weekday.
                     </p>
                   </div>
-                  <label className="flex items-center gap-2 rounded-full border border-slate-300 bg-white px-3 py-2 text-sm font-medium text-slate-700">
+                  <label className="flex items-center gap-2 rounded-full border border-slate-300 bg-white px-3 py-1.5 text-sm font-medium text-slate-700">
                     <input
                       type="checkbox"
                       checked={editorState.draft.repeatWeekly}
@@ -1825,7 +2127,7 @@ export function SchedulerApp() {
                 </div>
               </div>
 
-              <div className="rounded-[1.4rem] border border-slate-200 bg-slate-50 px-4 py-4 text-sm text-slate-600">
+              <div className="rounded-[1rem] border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-600">
                 <div className="flex flex-wrap items-center gap-3">
                   <span className="font-medium text-slate-950">
                     Duration:{" "}
@@ -1855,7 +2157,7 @@ export function SchedulerApp() {
                 )}
               </div>
 
-              <div className="rounded-[1.4rem] border border-slate-200 bg-white px-4 py-4 text-sm text-slate-600">
+              <div className="rounded-[1rem] border border-slate-200 bg-white px-3 py-3 text-sm text-slate-600">
                 <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
                   Booking details
                 </p>
@@ -1892,22 +2194,24 @@ export function SchedulerApp() {
                               )
                               .join(", ")
                           : "None selected"
-                      : computers.find(
-                          (computer) =>
-                            computer.id === editorState.draft.computerId,
-                        )?.name}
+                      : editorState.fullRoom
+                        ? "Full room"
+                        : computers.find(
+                            (computer) =>
+                              computer.id === editorState.draft.computerId,
+                          )?.name}
                   </p>
                 </div>
               </div>
             </div>
 
-            <div className="mt-6 flex flex-col gap-3 border-t border-slate-200 pt-5 sm:flex-row sm:items-center sm:justify-between">
+            <div className="mt-5 flex flex-col gap-3 border-t border-slate-200 pt-4 sm:flex-row sm:items-center sm:justify-between">
               <div>
-                {editorState.mode === "edit" && editorState.bookingId ? (
+                {editorState.mode === "edit" && editorState.bookingIds?.length ? (
                   <button
                     type="button"
-                    onClick={() => deleteBooking(editorState.bookingId!)}
-                    className="rounded-full border border-[var(--danger)]/25 bg-[var(--danger-soft)] px-4 py-2 text-sm font-medium text-[var(--danger)] transition hover:border-[var(--danger)]/45"
+                    onClick={() => deleteBooking(editorState.bookingIds!)}
+                    className="rounded-full border border-[var(--danger)]/25 bg-[var(--danger-soft)] px-4 py-1.5 text-sm font-medium text-[var(--danger)] transition hover:border-[var(--danger)]/45"
                   >
                     Delete booking
                   </button>
@@ -1917,14 +2221,14 @@ export function SchedulerApp() {
                 <button
                   type="button"
                   onClick={() => setEditorState(null)}
-                  className="rounded-full border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-950 hover:text-slate-950"
+                  className="rounded-full border border-slate-300 px-4 py-1.5 text-sm font-medium text-slate-700 transition hover:border-slate-950 hover:text-slate-950"
                 >
                   Cancel
                 </button>
                 <button
                   type="button"
                   onClick={saveEditor}
-                  className="rounded-full bg-slate-950 px-5 py-2 text-sm font-medium text-white shadow-[0_12px_24px_rgba(15,23,42,0.25)] transition hover:translate-y-[-1px] hover:shadow-[0_16px_30px_rgba(15,23,42,0.28)]"
+                  className="rounded-full bg-slate-950 px-5 py-1.5 text-sm font-medium text-white shadow-[0_12px_24px_rgba(15,23,42,0.25)] transition hover:translate-y-[-1px] hover:shadow-[0_16px_30px_rgba(15,23,42,0.28)]"
                 >
                   {editorState.mode === "create"
                     ? "Save booking"

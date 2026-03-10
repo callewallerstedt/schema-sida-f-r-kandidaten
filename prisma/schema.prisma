@@ -10,16 +10,19 @@ datasource db {
 model Booking {
   id            String   @id
   computerId    String
+  bookingSeriesId String?
   groupId       String
   title         String
   date          String
   startMinutes  Int
   endMinutes    Int
   repeatWeekly  Boolean  @default(false)
+  isFullRoom    Boolean  @default(false)
   createdAt     DateTime
   updatedAt     DateTime
 
   @@index([computerId, date])
+  @@index([bookingSeriesId])
 }
 
 model TimeSession {

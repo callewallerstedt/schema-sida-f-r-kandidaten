@@ -8,12 +8,14 @@ import {
 
 type BookingPayload = {
   computerId: string;
+  bookingSeriesId: string | null;
   groupId: string;
   title: string;
   date: string;
   startMinutes: number;
   endMinutes: number;
   repeatWeekly: boolean;
+  isFullRoom: boolean;
 };
 
 type OverlapBooking = Pick<
@@ -31,12 +33,15 @@ function isBookingPayload(value: unknown): value is BookingPayload {
   const booking = value as Record<string, unknown>;
   return (
     typeof booking.computerId === "string" &&
+    (typeof booking.bookingSeriesId === "string" ||
+      booking.bookingSeriesId === null) &&
     typeof booking.groupId === "string" &&
     typeof booking.title === "string" &&
     typeof booking.date === "string" &&
     typeof booking.startMinutes === "number" &&
     typeof booking.endMinutes === "number" &&
-    typeof booking.repeatWeekly === "boolean"
+    typeof booking.repeatWeekly === "boolean" &&
+    typeof booking.isFullRoom === "boolean"
   );
 }
 
@@ -51,6 +56,24 @@ function isValidBookingPayload(booking: BookingPayload) {
 
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Unexpected server error.";
+}
+
+function toOverlapBooking(booking: {
+  id: string;
+  computerId: string;
+  date: string;
+  startMinutes: number;
+  endMinutes: number;
+  repeatWeekly: boolean;
+}) {
+  return {
+    id: booking.id,
+    computerId: booking.computerId,
+    date: booking.date,
+    startMinutes: booking.startMinutes,
+    endMinutes: booking.endMinutes,
+    repeatWeekly: booking.repeatWeekly,
+  };
 }
 
 export async function GET() {
@@ -84,14 +107,7 @@ export async function POST(request: Request) {
     }
 
     const existingBookings = (await prisma.booking.findMany()).map(
-      (booking): OverlapBooking => ({
-        id: booking.id,
-        computerId: booking.computerId,
-        date: booking.date,
-        startMinutes: booking.startMinutes,
-        endMinutes: booking.endMinutes,
-        repeatWeekly: booking.repeatWeekly,
-      }),
+      (booking): OverlapBooking => toOverlapBooking(booking),
     );
     const pendingBookings: OverlapBooking[] = [...existingBookings];
 
@@ -140,10 +156,17 @@ export async function PATCH(request: Request) {
   try {
     const body = (await request.json()) as {
       id?: unknown;
+      ids?: unknown;
       booking?: unknown;
     };
 
-    if (typeof body.id !== "string" || !isBookingPayload(body.booking)) {
+    const targetIds = Array.isArray(body.ids)
+      ? body.ids.filter((value): value is string => typeof value === "string")
+      : typeof body.id === "string"
+        ? [body.id]
+        : [];
+
+    if (targetIds.length === 0 || !isBookingPayload(body.booking)) {
       return NextResponse.json(
         { error: "Invalid update payload." },
         { status: 400 },
@@ -156,34 +179,76 @@ export async function PATCH(request: Request) {
         { status: 400 },
       );
     }
+    const nextBooking = body.booking;
 
     const existingBookings = (await prisma.booking.findMany()).map(
-      (booking): OverlapBooking => ({
-        id: booking.id,
-        computerId: booking.computerId,
-        date: booking.date,
-        startMinutes: booking.startMinutes,
-        endMinutes: booking.endMinutes,
-        repeatWeekly: booking.repeatWeekly,
-      }),
+      (booking): OverlapBooking => toOverlapBooking(booking),
     );
-    if (hasOverlap(existingBookings, body.booking, body.id)) {
+
+    const targetBookings = await prisma.booking.findMany({
+      where: {
+        id: {
+          in: targetIds,
+        },
+      },
+      orderBy: [{ createdAt: "asc" }],
+    });
+
+    if (targetBookings.length !== targetIds.length) {
       return NextResponse.json(
-        { error: "Booking overlaps an existing booking." },
-        { status: 409 },
+        { error: "One or more bookings could not be found." },
+        { status: 404 },
       );
     }
 
-    const booking = await prisma.booking.update({
-      where: { id: body.id },
-      data: {
-        ...body.booking,
-        title: body.booking.title.trim(),
-        updatedAt: new Date(),
-      },
-    });
+    for (const targetBooking of targetBookings) {
+      if (
+        hasOverlap(
+          existingBookings,
+          {
+            computerId: targetBooking.computerId,
+            date: nextBooking.date,
+            startMinutes: nextBooking.startMinutes,
+            endMinutes: nextBooking.endMinutes,
+            repeatWeekly: nextBooking.repeatWeekly,
+          },
+          targetIds,
+        )
+      ) {
+        return NextResponse.json(
+          { error: "Booking overlaps an existing booking." },
+          { status: 409 },
+        );
+      }
+    }
 
-    return NextResponse.json({ booking });
+    const updatedAt = new Date();
+    const updatedBookings = await prisma.$transaction(
+      targetBookings.map((targetBooking) =>
+        prisma.booking.update({
+          where: { id: targetBooking.id },
+          data: {
+            computerId: nextBooking.isFullRoom
+              ? targetBooking.computerId
+              : nextBooking.computerId,
+            bookingSeriesId: nextBooking.bookingSeriesId,
+            groupId: nextBooking.groupId,
+            title: nextBooking.title.trim(),
+            date: nextBooking.date,
+            startMinutes: nextBooking.startMinutes,
+            endMinutes: nextBooking.endMinutes,
+            repeatWeekly: nextBooking.repeatWeekly,
+            isFullRoom: nextBooking.isFullRoom,
+            updatedAt,
+          },
+        }),
+      ),
+    );
+
+    return NextResponse.json({
+      booking: updatedBookings[0],
+      bookings: updatedBookings,
+    });
   } catch (error) {
     return NextResponse.json(
       { error: getErrorMessage(error) },
@@ -194,14 +259,24 @@ export async function PATCH(request: Request) {
 
 export async function DELETE(request: Request) {
   try {
-    const body = (await request.json()) as { id?: unknown };
+    const body = (await request.json()) as { id?: unknown; ids?: unknown };
 
-    if (typeof body.id !== "string") {
+    const targetIds = Array.isArray(body.ids)
+      ? body.ids.filter((value): value is string => typeof value === "string")
+      : typeof body.id === "string"
+        ? [body.id]
+        : [];
+
+    if (targetIds.length === 0) {
       return NextResponse.json({ error: "Missing booking ID." }, { status: 400 });
     }
 
-    await prisma.booking.delete({
-      where: { id: body.id },
+    await prisma.booking.deleteMany({
+      where: {
+        id: {
+          in: targetIds,
+        },
+      },
     });
 
     return NextResponse.json({ ok: true });

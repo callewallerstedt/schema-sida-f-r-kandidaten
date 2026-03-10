@@ -23,12 +23,14 @@ export type Group = {
 export type Booking = {
   id: string;
   computerId: string;
+  bookingSeriesId: string | null;
   groupId: string;
   title: string;
   date: string;
   startMinutes: number;
   endMinutes: number;
   repeatWeekly: boolean;
+  isFullRoom: boolean;
   createdAt: string;
   updatedAt: string;
 };
@@ -219,10 +221,16 @@ function canDatesCollide(
 export function hasOverlap(
   bookings: BookingOverlapShape[],
   candidate: Omit<BookingOverlapShape, "id">,
-  ignoreId?: string,
+  ignoreId?: string | string[],
 ) {
+  const ignoredIds = Array.isArray(ignoreId)
+    ? new Set(ignoreId)
+    : ignoreId
+      ? new Set([ignoreId])
+      : null;
+
   return bookings.some((booking) => {
-    if (ignoreId && booking.id === ignoreId) {
+    if (ignoredIds?.has(booking.id)) {
       return false;
     }
     if (
@@ -269,6 +277,9 @@ export function isBooking(value: unknown): value is Booking {
   return (
     typeof booking.id === "string" &&
     typeof booking.computerId === "string" &&
+    (typeof booking.bookingSeriesId === "string" ||
+      booking.bookingSeriesId === null ||
+      typeof booking.bookingSeriesId === "undefined") &&
     typeof booking.groupId === "string" &&
     typeof booking.title === "string" &&
     typeof booking.date === "string" &&
@@ -276,6 +287,8 @@ export function isBooking(value: unknown): value is Booking {
     typeof booking.endMinutes === "number" &&
     (typeof booking.repeatWeekly === "boolean" ||
       typeof booking.repeatWeekly === "undefined") &&
+    (typeof booking.isFullRoom === "boolean" ||
+      typeof booking.isFullRoom === "undefined") &&
     typeof booking.createdAt === "string" &&
     typeof booking.updatedAt === "string"
   );
