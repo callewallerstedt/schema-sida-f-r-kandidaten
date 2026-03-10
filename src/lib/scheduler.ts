@@ -51,6 +51,11 @@ export type WeekSummary = {
   byComputer: Record<string, number>;
 };
 
+type TimeInterval = {
+  startMinutes: number;
+  endMinutes: number;
+};
+
 export type TimeSession = {
   id: string;
   userId: string;
@@ -189,6 +194,67 @@ export function bookingDuration(booking: Pick<Booking, "startMinutes" | "endMinu
   return Math.max(0, booking.endMinutes - booking.startMinutes);
 }
 
+function mergeIntervals(intervals: TimeInterval[]) {
+  if (intervals.length === 0) {
+    return [];
+  }
+
+  const sorted = [...intervals].sort(
+    (left, right) => left.startMinutes - right.startMinutes,
+  );
+  const merged: TimeInterval[] = [sorted[0]];
+
+  for (const interval of sorted.slice(1)) {
+    const current = merged[merged.length - 1];
+    if (interval.startMinutes <= current.endMinutes) {
+      current.endMinutes = Math.max(current.endMinutes, interval.endMinutes);
+      continue;
+    }
+    merged.push({ ...interval });
+  }
+
+  return merged;
+}
+
+function totalMergedMinutes(intervals: TimeInterval[]) {
+  return mergeIntervals(intervals).reduce(
+    (total, interval) => total + Math.max(0, interval.endMinutes - interval.startMinutes),
+    0,
+  );
+}
+
+export function computePresenceMinutes(bookings: Booking[]) {
+  const intervalsByGroupAndDay = new Map<string, TimeInterval[]>();
+
+  for (const booking of bookings) {
+    const key = `${booking.groupId}:${booking.date}`;
+    const current = intervalsByGroupAndDay.get(key) ?? [];
+    current.push({
+      startMinutes: booking.startMinutes,
+      endMinutes: booking.endMinutes,
+    });
+    intervalsByGroupAndDay.set(key, current);
+  }
+
+  let totalMinutes = 0;
+  const byGroup = Object.fromEntries(groups.map((group) => [group.id, 0])) as Record<
+    string,
+    number
+  >;
+
+  for (const [key, intervals] of intervalsByGroupAndDay.entries()) {
+    const [groupId] = key.split(":");
+    const mergedMinutes = totalMergedMinutes(intervals);
+    byGroup[groupId] = (byGroup[groupId] ?? 0) + mergedMinutes;
+    totalMinutes += mergedMinutes;
+  }
+
+  return {
+    totalMinutes,
+    byGroup,
+  };
+}
+
 function getWeekday(dateKey: string) {
   return parseDateKey(dateKey).getDay();
 }
@@ -247,17 +313,15 @@ export function hasOverlap(
 }
 
 export function computeWeekSummary(bookings: Booking[]): WeekSummary {
+  const presence = computePresenceMinutes(bookings);
   const summary: WeekSummary = {
-    totalMinutes: 0,
-    byGroup: Object.fromEntries(groups.map((group) => [group.id, 0])),
+    totalMinutes: presence.totalMinutes,
+    byGroup: presence.byGroup,
     byComputer: Object.fromEntries(computers.map((computer) => [computer.id, 0])),
   };
 
   for (const booking of bookings) {
     const duration = bookingDuration(booking);
-    summary.totalMinutes += duration;
-    summary.byGroup[booking.groupId] =
-      (summary.byGroup[booking.groupId] ?? 0) + duration;
     summary.byComputer[booking.computerId] =
       (summary.byComputer[booking.computerId] ?? 0) + duration;
   }

@@ -18,6 +18,7 @@ import {
   bookingDuration,
   clampMinutes,
   computeWeekSummary,
+  computePresenceMinutes,
   computers,
   formatDateKey,
   formatDayLabel,
@@ -228,6 +229,43 @@ function getScheduleMinutesFromPosition(offset: number, laneHeight: number) {
     (Math.min(DAY_MINUTES, Math.max(0, minutes)) / DAY_MINUTES) * range;
 
   return clampMinutes(mapped);
+}
+
+function ensureValidTimeRange(
+  draft: BookingDraft,
+  field: "startMinutes" | "endMinutes",
+  minutes: number,
+) {
+  if (field === "startMinutes") {
+    const nextStart = Math.max(
+      SCHEDULE_START_MINUTES,
+      Math.min(minutes, SCHEDULE_END_MINUTES - MIN_BOOKING_MINUTES),
+    );
+    const nextEnd = Math.max(
+      draft.endMinutes,
+      Math.min(SCHEDULE_END_MINUTES, nextStart + MIN_BOOKING_MINUTES),
+    );
+    return {
+      ...draft,
+      startMinutes: nextStart,
+      endMinutes: nextEnd,
+    };
+  }
+
+  const nextEnd = Math.min(
+    SCHEDULE_END_MINUTES,
+    Math.max(minutes, SCHEDULE_START_MINUTES + MIN_BOOKING_MINUTES),
+  );
+  const nextStart = Math.min(
+    draft.startMinutes,
+    Math.max(SCHEDULE_START_MINUTES, nextEnd - MIN_BOOKING_MINUTES),
+  );
+
+  return {
+    ...draft,
+    startMinutes: nextStart,
+    endMinutes: nextEnd,
+  };
 }
 
 function occursThisWeek(booking: Booking, weekDays: string[]) {
@@ -619,6 +657,21 @@ export function SchedulerApp() {
     [weekBookings],
   );
 
+  const presenceMinutesByDay = useMemo(() => {
+    const map = new Map<string, number>();
+
+    for (const day of weekDays) {
+      map.set(
+        day,
+        computePresenceMinutes(
+          weekBookings.filter((booking) => booking.date === day),
+        ).totalMinutes,
+      );
+    }
+
+    return map;
+  }, [weekBookings, weekDays]);
+
   const bookingsByLane = useMemo(() => {
     const map = new Map<string, Booking[]>();
 
@@ -988,10 +1041,17 @@ export function SchedulerApp() {
 
       return {
         ...current,
-        draft: {
-          ...current.draft,
-          [field]: value,
-        },
+        draft:
+          field === "startMinutes" || field === "endMinutes"
+            ? ensureValidTimeRange(
+                current.draft,
+                field,
+                Number(value),
+              )
+            : {
+                ...current.draft,
+                [field]: value,
+              },
       };
     });
   };
@@ -1392,9 +1452,7 @@ export function SchedulerApp() {
                       }
                     : null;
 
-                const dayTotal = visibleComputers.reduce((total, computer) => {
-                  return total + (bookingMinutesByLane.get(`${computer.id}:${day}`) ?? 0);
-                }, 0);
+                const dayTotal = presenceMinutesByDay.get(day) ?? 0;
                 const fullRoomBookings = fullRoomBookingsByDay.get(day) ?? [];
 
                 return (
@@ -1478,16 +1536,22 @@ export function SchedulerApp() {
                                 {VISIBLE_HOUR_MARKERS.map((hour) => (
                                   <span
                                     key={hour}
-                                    className="pointer-events-none absolute left-1 z-[1] rounded-full bg-white/85 px-1 py-0.5 text-[7px] font-semibold uppercase tracking-[0.1em] text-slate-400"
+                                    className="pointer-events-none absolute left-1 z-[6] rounded-full bg-white/95 px-1 py-0.5 text-[7px] font-semibold uppercase tracking-[0.1em] text-slate-500 shadow-sm"
                                     style={{
-                                      top: `${((hour * 60 - SCHEDULE_START_MINUTES) / (SCHEDULE_END_MINUTES - SCHEDULE_START_MINUTES)) * 100}%`,
-                                      transform: "translateY(-50%)",
+                                      top:
+                                        hour === SCHEDULE_START_MINUTES / 60
+                                          ? "0.35rem"
+                                          : `${((hour * 60 - SCHEDULE_START_MINUTES) / (SCHEDULE_END_MINUTES - SCHEDULE_START_MINUTES)) * 100}%`,
+                                      transform:
+                                        hour === SCHEDULE_START_MINUTES / 60
+                                          ? "none"
+                                          : "translateY(-50%)",
                                     }}
                                   >
                                     {minutesToTime(hour * 60)}
                                   </span>
                                 ))}
-                                <span className="pointer-events-none absolute bottom-1.5 left-1 rounded-full bg-white/85 px-1 py-0.5 text-[7px] font-semibold uppercase tracking-[0.1em] text-slate-400">
+                                <span className="pointer-events-none absolute bottom-1 left-1 z-[6] rounded-full bg-white/95 px-1 py-0.5 text-[7px] font-semibold uppercase tracking-[0.1em] text-slate-500 shadow-sm">
                                   17:00
                                 </span>
 
@@ -2020,7 +2084,10 @@ export function SchedulerApp() {
                     }
                     className="rounded-[1rem] border border-slate-300 bg-slate-50 px-3 py-2.5 text-base text-slate-950 outline-none transition focus:border-slate-950"
                   >
-                    {TIME_OPTIONS.map((minutes) => (
+                    {TIME_OPTIONS.filter(
+                      (minutes) =>
+                        minutes <= editorState.draft.endMinutes - MIN_BOOKING_MINUTES,
+                    ).map((minutes) => (
                       <option key={minutes} value={minutes}>
                         {minutesToTime(minutes)}
                       </option>
@@ -2042,7 +2109,10 @@ export function SchedulerApp() {
                     }
                     className="rounded-[1rem] border border-slate-300 bg-slate-50 px-3 py-2.5 text-base text-slate-950 outline-none transition focus:border-slate-950"
                   >
-                    {TIME_OPTIONS.map((minutes) => (
+                    {TIME_OPTIONS.filter(
+                      (minutes) =>
+                        minutes >= editorState.draft.startMinutes + MIN_BOOKING_MINUTES,
+                    ).map((minutes) => (
                       <option key={minutes} value={minutes}>
                         {minutesToTime(minutes)}
                       </option>
