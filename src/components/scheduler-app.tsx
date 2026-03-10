@@ -9,12 +9,10 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import {
-  BOOKINGS_STORAGE_KEY,
   DAY_MINUTES,
   MIN_BOOKING_MINUTES,
   SCHEDULE_END_MINUTES,
   SCHEDULE_START_MINUTES,
-  TIME_SESSIONS_STORAGE_KEY,
   VIEW_STORAGE_KEY,
   addDays,
   bookingDuration,
@@ -31,8 +29,6 @@ import {
   getWeekDays,
   groups,
   hasOverlap,
-  isBooking,
-  isTimeSession,
   minutesToTime,
   parseDateKey,
   sessionDurationMinutes,
@@ -88,10 +84,6 @@ type ViewStorage = {
   filteredComputerIds?: string[];
 };
 
-type TrackingState = {
-  sessions: TimeSession[];
-};
-
 function loadInitialState() {
   const fallbackWeekStart = getInitialWeekStart();
 
@@ -105,26 +97,11 @@ function loadInitialState() {
   }
 
   try {
-    const storedBookings = localStorage.getItem(BOOKINGS_STORAGE_KEY);
     const storedView = localStorage.getItem(VIEW_STORAGE_KEY);
-    const parsedBookings = storedBookings ? JSON.parse(storedBookings) : [];
     const parsedView = storedView ? (JSON.parse(storedView) as ViewStorage) : {};
 
     return {
-      bookings: Array.isArray(parsedBookings)
-        ? parsedBookings
-              .filter(isBooking)
-              .map((booking) => ({
-                ...booking,
-                repeatWeekly: booking.repeatWeekly ?? false,
-              }))
-              .filter(
-                (booking) =>
-                  booking.startMinutes >= SCHEDULE_START_MINUTES &&
-                booking.endMinutes <= SCHEDULE_END_MINUTES &&
-                booking.endMinutes > booking.startMinutes,
-            )
-        : [],
+      bookings: [] as Booking[],
       weekStart: parsedView.weekStart ?? fallbackWeekStart,
       activeGroupId:
         parsedView.lastGroupId &&
@@ -147,25 +124,6 @@ function loadInitialState() {
       activeGroupId: DEFAULT_GROUP_ID,
       filteredComputerIds: computers.map((computer) => computer.id),
     };
-  }
-}
-
-function loadTrackingState(): TrackingState {
-  if (typeof window === "undefined") {
-    return { sessions: [] };
-  }
-
-  try {
-    const storedSessions = localStorage.getItem(TIME_SESSIONS_STORAGE_KEY);
-    const parsedSessions = storedSessions ? JSON.parse(storedSessions) : [];
-
-    return {
-      sessions: Array.isArray(parsedSessions)
-        ? parsedSessions.filter(isTimeSession)
-        : [],
-    };
-  } catch {
-    return { sessions: [] };
   }
 }
 
@@ -281,13 +239,20 @@ function getInitialWeekStart() {
   return formatDateKey(startOfWeek(new Date()));
 }
 
+async function parseJsonResponse<T>(response: Response): Promise<T> {
+  const body = (await response.json()) as T & { error?: string };
+
+  if (!response.ok) {
+    throw new Error(body.error ?? "Request failed.");
+  }
+
+  return body;
+}
+
 export function SchedulerApp() {
   const [initialState] = useState(loadInitialState);
-  const [trackingState] = useState(loadTrackingState);
   const [bookings, setBookings] = useState<Booking[]>(initialState.bookings);
-  const [timeSessions, setTimeSessions] = useState<TimeSession[]>(
-    trackingState.sessions,
-  );
+  const [timeSessions, setTimeSessions] = useState<TimeSession[]>([]);
   const [weekStart, setWeekStart] = useState(initialState.weekStart);
   const [activeGroupId, setActiveGroupId] = useState(
     initialState.activeGroupId,
@@ -302,6 +267,7 @@ export function SchedulerApp() {
   const [trackingUserId, setTrackingUserId] = useState("");
   const [checkoutNote, setCheckoutNote] = useState("");
   const [now, setNow] = useState(() => Date.now());
+  const [isDataLoading, setIsDataLoading] = useState(true);
 
   const dragStateRef = useRef<DragState | null>(null);
   const bookingsRef = useRef<Booking[]>([]);
@@ -333,11 +299,53 @@ export function SchedulerApp() {
   }, [filteredComputerIds]);
 
   useEffect(() => {
+    let cancelled = false;
+
+    const loadData = async () => {
+      try {
+        const [bookingsResponse, sessionsResponse] = await Promise.all([
+          fetch("/api/bookings", { cache: "no-store" }),
+          fetch("/api/time-sessions", { cache: "no-store" }),
+        ]);
+
+        const bookingsBody = await parseJsonResponse<{ bookings: Booking[] }>(
+          bookingsResponse,
+        );
+        const sessionsBody = await parseJsonResponse<{
+          sessions: TimeSession[];
+        }>(sessionsResponse);
+
+        if (!cancelled) {
+          setBookings(bookingsBody.bookings);
+          setTimeSessions(sessionsBody.sessions);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setToast(
+            error instanceof Error
+              ? error.message
+              : "Failed to load shared schedule data.",
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setIsDataLoading(false);
+        }
+      }
+    };
+
+    void loadData();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     if (!weekStart) {
       return;
     }
 
-    localStorage.setItem(BOOKINGS_STORAGE_KEY, JSON.stringify(bookings));
     localStorage.setItem(
       VIEW_STORAGE_KEY,
       JSON.stringify({
@@ -346,14 +354,7 @@ export function SchedulerApp() {
         filteredComputerIds,
       } satisfies ViewStorage),
     );
-  }, [activeGroupId, bookings, filteredComputerIds, weekStart]);
-
-  useEffect(() => {
-    localStorage.setItem(
-      TIME_SESSIONS_STORAGE_KEY,
-      JSON.stringify(timeSessions),
-    );
-  }, [timeSessions]);
+  }, [activeGroupId, filteredComputerIds, weekStart]);
 
   useEffect(() => {
     if (!toast) {
@@ -477,11 +478,40 @@ export function SchedulerApp() {
         return;
       }
 
-      setBookings((currentBookings) =>
-        currentBookings.map((entry) =>
-          entry.id === current.bookingId ? nextBooking : entry,
-        ),
-      );
+      void (async () => {
+        try {
+          const response = await fetch("/api/bookings", {
+            method: "PATCH",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              id: current.bookingId,
+              booking: {
+                computerId: nextBooking.computerId,
+                groupId: nextBooking.groupId,
+                title: nextBooking.title,
+                date: nextBooking.date,
+                startMinutes: nextBooking.startMinutes,
+                endMinutes: nextBooking.endMinutes,
+                repeatWeekly: nextBooking.repeatWeekly,
+              },
+            }),
+          });
+          const body = await parseJsonResponse<{ booking: Booking }>(response);
+          setBookings((currentBookings) =>
+            currentBookings.map((entry) =>
+              entry.id === current.bookingId ? body.booking : entry,
+            ),
+          );
+        } catch (error) {
+          setToast(
+            error instanceof Error
+              ? error.message
+              : "Failed to update booking.",
+          );
+        }
+      })();
       setDragState(null);
     };
 
@@ -818,7 +848,47 @@ export function SchedulerApp() {
     });
   };
 
-  const saveEditor = () => {
+  const createBookings = async (drafts: BookingDraft[]) => {
+    const response = await fetch("/api/bookings", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ bookings: drafts }),
+    });
+    const body = await parseJsonResponse<{ bookings: Booking[] }>(response);
+    setBookings((currentBookings) => [...currentBookings, ...body.bookings]);
+  };
+
+  const updateBooking = async (id: string, booking: BookingDraft) => {
+    const response = await fetch("/api/bookings", {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ id, booking }),
+    });
+    const body = await parseJsonResponse<{ booking: Booking }>(response);
+    setBookings((currentBookings) =>
+      currentBookings.map((entry) => (entry.id === id ? body.booking : entry)),
+    );
+  };
+
+  const removeBooking = async (id: string) => {
+    const response = await fetch("/api/bookings", {
+      method: "DELETE",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ id }),
+    });
+    await parseJsonResponse<{ ok: boolean }>(response);
+    setBookings((currentBookings) =>
+      currentBookings.filter((entry) => entry.id !== id),
+    );
+  };
+
+  const saveEditor = async () => {
     if (!editorState || editorError) {
       if (editorError) {
         setToast(editorError);
@@ -827,51 +897,47 @@ export function SchedulerApp() {
     }
 
     const title = editorState.draft.title.trim();
-    const timestamp = new Date().toISOString();
+    try {
+      if (editorState.mode === "create") {
+        const targetComputerIds = editorState.fullRoom
+          ? computers.map((computer) => computer.id)
+          : Array.from(new Set(editorState.selectedComputerIds ?? []));
 
-    if (editorState.mode === "create") {
-      const targetComputerIds = editorState.fullRoom
-        ? computers.map((computer) => computer.id)
-        : Array.from(new Set(editorState.selectedComputerIds ?? []));
-
-      setBookings((currentBookings) => [
-        ...currentBookings,
-        ...targetComputerIds.map((computerId) => ({
+        await createBookings(
+          targetComputerIds.map((computerId) => ({
+            ...editorState.draft,
+            computerId,
+            title,
+          })),
+        );
+      } else if (editorState.bookingId) {
+        await updateBooking(editorState.bookingId, {
           ...editorState.draft,
-          computerId,
           title,
-          id: crypto.randomUUID(),
-          createdAt: timestamp,
-          updatedAt: timestamp,
-        })),
-      ]);
-    } else if (editorState.bookingId) {
-      setBookings((currentBookings) =>
-        currentBookings.map((booking) =>
-          booking.id === editorState.bookingId
-            ? {
-                ...booking,
-                ...editorState.draft,
-                title,
-                updatedAt: timestamp,
-              }
-            : booking,
-        ),
+        });
+      }
+
+      setActiveGroupId(editorState.draft.groupId);
+      setEditorState(null);
+    } catch (error) {
+      setToast(
+        error instanceof Error ? error.message : "Failed to save booking.",
       );
     }
-
-    setActiveGroupId(editorState.draft.groupId);
-    setEditorState(null);
   };
 
-  const deleteBooking = (bookingId: string) => {
-    setBookings((currentBookings) =>
-      currentBookings.filter((booking) => booking.id !== bookingId),
-    );
-    setEditorState(null);
+  const deleteBooking = async (bookingId: string) => {
+    try {
+      await removeBooking(bookingId);
+      setEditorState(null);
+    } catch (error) {
+      setToast(
+        error instanceof Error ? error.message : "Failed to delete booking.",
+      );
+    }
   };
 
-  const handleCheckIn = () => {
+  const handleCheckIn = async () => {
     if (!normalizedTrackingUserId) {
       setToast("Enter a user ID before checking in.");
       return;
@@ -882,50 +948,62 @@ export function SchedulerApp() {
       return;
     }
 
-    const timestamp = new Date().toISOString();
-
-    setTimeSessions((currentSessions) => [
-      {
-        id: crypto.randomUUID(),
-        userId: normalizedTrackingUserId,
-        computerId: "",
-        checkInAt: timestamp,
-        checkOutAt: null,
-        note: "",
-        createdAt: timestamp,
-        updatedAt: timestamp,
-      },
-      ...currentSessions,
-    ]);
-    setCheckoutNote("");
-    setToast(`Checked in ${normalizedTrackingUserId}.`);
+    try {
+      const response = await fetch("/api/time-sessions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          action: "check-in",
+          userId: normalizedTrackingUserId,
+        }),
+      });
+      const body = await parseJsonResponse<{ session: TimeSession }>(response);
+      setTimeSessions((currentSessions) => [body.session, ...currentSessions]);
+      setCheckoutNote("");
+      setToast(`Checked in ${normalizedTrackingUserId}.`);
+    } catch (error) {
+      setToast(
+        error instanceof Error ? error.message : "Failed to check in.",
+      );
+    }
   };
 
-  const handleCheckOut = () => {
+  const handleCheckOut = async () => {
     if (!activeSessionForUser) {
       setToast("No active session found for that user ID.");
       return;
     }
 
-    const timestamp = new Date().toISOString();
-
-    setTimeSessions((currentSessions) =>
-      currentSessions.map((session) =>
-        session.id === activeSessionForUser.id
-          ? {
-              ...session,
-              checkOutAt: timestamp,
-              note: checkoutNote.trim(),
-              updatedAt: timestamp,
-            }
-          : session,
-      ),
-    );
-    setCheckoutNote("");
-    setToast(`Checked out ${activeSessionForUser.userId}.`);
+    try {
+      const response = await fetch("/api/time-sessions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          action: "check-out",
+          userId: activeSessionForUser.userId,
+          note: checkoutNote.trim(),
+        }),
+      });
+      const body = await parseJsonResponse<{ session: TimeSession }>(response);
+      setTimeSessions((currentSessions) =>
+        currentSessions.map((session) =>
+          session.id === body.session.id ? body.session : session,
+        ),
+      );
+      setCheckoutNote("");
+      setToast(`Checked out ${activeSessionForUser.userId}.`);
+    } catch (error) {
+      setToast(
+        error instanceof Error ? error.message : "Failed to check out.",
+      );
+    }
   };
 
-  if (!weekStart) {
+  if (!weekStart || isDataLoading) {
     return (
       <main className="min-h-screen bg-[var(--page-background)] px-6 py-8 text-[var(--foreground)]">
         <div className="mx-auto max-w-7xl animate-pulse rounded-[2rem] border border-white/60 bg-white/70 p-8 shadow-[0_30px_80px_rgba(15,23,42,0.12)] backdrop-blur">

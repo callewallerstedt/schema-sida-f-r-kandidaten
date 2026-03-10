@@ -38,6 +38,11 @@ export type BookingDraft = Omit<
   "id" | "createdAt" | "updatedAt"
 >;
 
+export type BookingOverlapShape = Pick<
+  Booking,
+  "id" | "computerId" | "date" | "startMinutes" | "endMinutes" | "repeatWeekly"
+>;
+
 export type WeekSummary = {
   totalMinutes: number;
   byGroup: Record<string, number>;
@@ -47,7 +52,7 @@ export type WeekSummary = {
 export type TimeSession = {
   id: string;
   userId: string;
-  computerId: string;
+  computerId: string | null;
   checkInAt: string;
   checkOutAt: string | null;
   note: string;
@@ -187,8 +192,8 @@ function getWeekday(dateKey: string) {
 }
 
 function canDatesCollide(
-  existing: Pick<Booking, "date" | "repeatWeekly">,
-  candidate: Pick<Booking, "date" | "repeatWeekly">,
+  existing: Pick<BookingOverlapShape, "date" | "repeatWeekly">,
+  candidate: Pick<BookingOverlapShape, "date" | "repeatWeekly">,
 ) {
   if (existing.repeatWeekly && candidate.repeatWeekly) {
     return getWeekday(existing.date) === getWeekday(candidate.date);
@@ -212,11 +217,8 @@ function canDatesCollide(
 }
 
 export function hasOverlap(
-  bookings: Booking[],
-  candidate: Pick<
-    Booking,
-    "computerId" | "date" | "startMinutes" | "endMinutes" | "repeatWeekly"
-  >,
+  bookings: BookingOverlapShape[],
+  candidate: Omit<BookingOverlapShape, "id">,
   ignoreId?: string,
 ) {
   return bookings.some((booking) => {
@@ -287,7 +289,7 @@ export function isTimeSession(value: unknown): value is TimeSession {
   return (
     typeof session.id === "string" &&
     typeof session.userId === "string" &&
-    typeof session.computerId === "string" &&
+    (typeof session.computerId === "string" || session.computerId === null) &&
     typeof session.checkInAt === "string" &&
     (typeof session.checkOutAt === "string" || session.checkOutAt === null) &&
     typeof session.note === "string" &&

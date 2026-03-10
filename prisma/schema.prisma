@@ -1,0 +1,36 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Booking {
+  id            String   @id
+  computerId    String
+  groupId       String
+  title         String
+  date          String
+  startMinutes  Int
+  endMinutes    Int
+  repeatWeekly  Boolean  @default(false)
+  createdAt     DateTime
+  updatedAt     DateTime
+
+  @@index([computerId, date])
+}
+
+model TimeSession {
+  id         String   @id
+  userId     String
+  computerId String?
+  checkInAt  DateTime
+  checkOutAt DateTime?
+  note       String   @default("")
+  createdAt  DateTime
+  updatedAt  DateTime
+
+  @@index([userId, checkOutAt])
+}
