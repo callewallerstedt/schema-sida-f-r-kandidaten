@@ -49,134 +49,166 @@ function isValidBookingPayload(booking: BookingPayload) {
   );
 }
 
-export async function GET() {
-  const bookings = await prisma.booking.findMany({
-    orderBy: [{ date: "asc" }, { startMinutes: "asc" }],
-  });
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Unexpected server error.";
+}
 
-  return NextResponse.json({ bookings });
+export async function GET() {
+  try {
+    const bookings = await prisma.booking.findMany({
+      orderBy: [{ date: "asc" }, { startMinutes: "asc" }],
+    });
+
+    return NextResponse.json({ bookings });
+  } catch (error) {
+    return NextResponse.json(
+      { error: getErrorMessage(error) },
+      { status: 500 },
+    );
+  }
 }
 
 export async function POST(request: Request) {
-  const body = (await request.json()) as { bookings?: unknown };
-  const bookings = Array.isArray(body.bookings) ? body.bookings : [];
+  try {
+    const body = (await request.json()) as { bookings?: unknown };
+    const bookings = Array.isArray(body.bookings) ? body.bookings : [];
 
-  if (
-    bookings.length === 0 ||
-    !bookings.every((booking) => isBookingPayload(booking) && isValidBookingPayload(booking))
-  ) {
-    return NextResponse.json(
-      { error: "Invalid booking payload." },
-      { status: 400 },
-    );
-  }
-
-  const existingBookings = (await prisma.booking.findMany()).map(
-    (booking): OverlapBooking => ({
-      id: booking.id,
-      computerId: booking.computerId,
-      date: booking.date,
-      startMinutes: booking.startMinutes,
-      endMinutes: booking.endMinutes,
-      repeatWeekly: booking.repeatWeekly,
-    }),
-  );
-  const pendingBookings: OverlapBooking[] = [...existingBookings];
-
-  for (const booking of bookings) {
-    if (hasOverlap(pendingBookings, booking)) {
+    if (
+      bookings.length === 0 ||
+      !bookings.every((booking) => isBookingPayload(booking) && isValidBookingPayload(booking))
+    ) {
       return NextResponse.json(
-        { error: "One or more bookings overlap an existing booking." },
-        { status: 409 },
+        { error: "Invalid booking payload." },
+        { status: 400 },
       );
     }
-    pendingBookings.push({
-      id: crypto.randomUUID(),
-      computerId: booking.computerId,
-      date: booking.date,
-      startMinutes: booking.startMinutes,
-      endMinutes: booking.endMinutes,
-      repeatWeekly: booking.repeatWeekly,
-    });
-  }
 
-  const timestamp = new Date();
-  const created = await prisma.$transaction(
-    bookings.map((booking) =>
-      prisma.booking.create({
-        data: {
-          id: crypto.randomUUID(),
-          ...booking,
-          title: booking.title.trim(),
-          createdAt: timestamp,
-          updatedAt: timestamp,
-        },
+    const existingBookings = (await prisma.booking.findMany()).map(
+      (booking): OverlapBooking => ({
+        id: booking.id,
+        computerId: booking.computerId,
+        date: booking.date,
+        startMinutes: booking.startMinutes,
+        endMinutes: booking.endMinutes,
+        repeatWeekly: booking.repeatWeekly,
       }),
-    ),
-  );
+    );
+    const pendingBookings: OverlapBooking[] = [...existingBookings];
 
-  return NextResponse.json({ bookings: created }, { status: 201 });
+    for (const booking of bookings) {
+      if (hasOverlap(pendingBookings, booking)) {
+        return NextResponse.json(
+          { error: "One or more bookings overlap an existing booking." },
+          { status: 409 },
+        );
+      }
+      pendingBookings.push({
+        id: crypto.randomUUID(),
+        computerId: booking.computerId,
+        date: booking.date,
+        startMinutes: booking.startMinutes,
+        endMinutes: booking.endMinutes,
+        repeatWeekly: booking.repeatWeekly,
+      });
+    }
+
+    const timestamp = new Date();
+    const created = await prisma.$transaction(
+      bookings.map((booking) =>
+        prisma.booking.create({
+          data: {
+            id: crypto.randomUUID(),
+            ...booking,
+            title: booking.title.trim(),
+            createdAt: timestamp,
+            updatedAt: timestamp,
+          },
+        }),
+      ),
+    );
+
+    return NextResponse.json({ bookings: created }, { status: 201 });
+  } catch (error) {
+    return NextResponse.json(
+      { error: getErrorMessage(error) },
+      { status: 500 },
+    );
+  }
 }
 
 export async function PATCH(request: Request) {
-  const body = (await request.json()) as {
-    id?: unknown;
-    booking?: unknown;
-  };
+  try {
+    const body = (await request.json()) as {
+      id?: unknown;
+      booking?: unknown;
+    };
 
-  if (typeof body.id !== "string" || !isBookingPayload(body.booking)) {
+    if (typeof body.id !== "string" || !isBookingPayload(body.booking)) {
+      return NextResponse.json(
+        { error: "Invalid update payload." },
+        { status: 400 },
+      );
+    }
+
+    if (!isValidBookingPayload(body.booking)) {
+      return NextResponse.json(
+        { error: "Booking must be between 08:00 and 17:00." },
+        { status: 400 },
+      );
+    }
+
+    const existingBookings = (await prisma.booking.findMany()).map(
+      (booking): OverlapBooking => ({
+        id: booking.id,
+        computerId: booking.computerId,
+        date: booking.date,
+        startMinutes: booking.startMinutes,
+        endMinutes: booking.endMinutes,
+        repeatWeekly: booking.repeatWeekly,
+      }),
+    );
+    if (hasOverlap(existingBookings, body.booking, body.id)) {
+      return NextResponse.json(
+        { error: "Booking overlaps an existing booking." },
+        { status: 409 },
+      );
+    }
+
+    const booking = await prisma.booking.update({
+      where: { id: body.id },
+      data: {
+        ...body.booking,
+        title: body.booking.title.trim(),
+        updatedAt: new Date(),
+      },
+    });
+
+    return NextResponse.json({ booking });
+  } catch (error) {
     return NextResponse.json(
-      { error: "Invalid update payload." },
-      { status: 400 },
+      { error: getErrorMessage(error) },
+      { status: 500 },
     );
   }
-
-  if (!isValidBookingPayload(body.booking)) {
-    return NextResponse.json(
-      { error: "Booking must be between 08:00 and 17:00." },
-      { status: 400 },
-    );
-  }
-
-  const existingBookings = (await prisma.booking.findMany()).map(
-    (booking): OverlapBooking => ({
-      id: booking.id,
-      computerId: booking.computerId,
-      date: booking.date,
-      startMinutes: booking.startMinutes,
-      endMinutes: booking.endMinutes,
-      repeatWeekly: booking.repeatWeekly,
-    }),
-  );
-  if (hasOverlap(existingBookings, body.booking, body.id)) {
-    return NextResponse.json(
-      { error: "Booking overlaps an existing booking." },
-      { status: 409 },
-    );
-  }
-
-  const booking = await prisma.booking.update({
-    where: { id: body.id },
-    data: {
-      ...body.booking,
-      title: body.booking.title.trim(),
-      updatedAt: new Date(),
-    },
-  });
-
-  return NextResponse.json({ booking });
 }
 
 export async function DELETE(request: Request) {
-  const body = (await request.json()) as { id?: unknown };
+  try {
+    const body = (await request.json()) as { id?: unknown };
 
-  if (typeof body.id !== "string") {
-    return NextResponse.json({ error: "Missing booking ID." }, { status: 400 });
+    if (typeof body.id !== "string") {
+      return NextResponse.json({ error: "Missing booking ID." }, { status: 400 });
+    }
+
+    await prisma.booking.delete({
+      where: { id: body.id },
+    });
+
+    return NextResponse.json({ ok: true });
+  } catch (error) {
+    return NextResponse.json(
+      { error: getErrorMessage(error) },
+      { status: 500 },
+    );
   }
-
-  await prisma.booking.delete({
-    where: { id: body.id },
-  });
-
-  return NextResponse.json({ ok: true });
 }

@@ -240,10 +240,26 @@ function getInitialWeekStart() {
 }
 
 async function parseJsonResponse<T>(response: Response): Promise<T> {
-  const body = (await response.json()) as T & { error?: string };
+  const raw = await response.text();
+  let body: (T & { error?: string }) | null = null;
+
+  if (raw) {
+    try {
+      body = JSON.parse(raw) as T & { error?: string };
+    } catch {
+      if (!response.ok) {
+        throw new Error(`Request failed (${response.status}).`);
+      }
+      throw new Error("Server returned an invalid response.");
+    }
+  }
 
   if (!response.ok) {
-    throw new Error(body.error ?? "Request failed.");
+    throw new Error(body?.error ?? `Request failed (${response.status}).`);
+  }
+
+  if (!body) {
+    throw new Error("Server returned an empty response.");
   }
 
   return body;

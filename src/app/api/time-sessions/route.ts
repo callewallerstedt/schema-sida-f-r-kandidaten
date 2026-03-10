@@ -12,85 +12,103 @@ type CheckOutBody = {
   note?: string;
 };
 
-export async function GET() {
-  const sessions = await prisma.timeSession.findMany({
-    orderBy: [{ checkInAt: "desc" }],
-  });
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Unexpected server error.";
+}
 
-  return NextResponse.json({ sessions });
+export async function GET() {
+  try {
+    const sessions = await prisma.timeSession.findMany({
+      orderBy: [{ checkInAt: "desc" }],
+    });
+
+    return NextResponse.json({ sessions });
+  } catch (error) {
+    return NextResponse.json(
+      { error: getErrorMessage(error) },
+      { status: 500 },
+    );
+  }
 }
 
 export async function POST(request: Request) {
-  const body = (await request.json()) as CheckInBody | CheckOutBody;
+  try {
+    const body = (await request.json()) as CheckInBody | CheckOutBody;
 
-  if (body.action === "check-in") {
-    const userId = body.userId?.trim();
-    if (!userId) {
-      return NextResponse.json({ error: "Missing user ID." }, { status: 400 });
+    if (body.action === "check-in") {
+      const userId = body.userId?.trim();
+      if (!userId) {
+        return NextResponse.json({ error: "Missing user ID." }, { status: 400 });
+      }
+
+      const existing = await prisma.timeSession.findFirst({
+        where: {
+          userId: { equals: userId, mode: "insensitive" },
+          checkOutAt: null,
+        },
+      });
+
+      if (existing) {
+        return NextResponse.json(
+          { error: "User is already checked in." },
+          { status: 409 },
+        );
+      }
+
+      const now = new Date();
+      const session = await prisma.timeSession.create({
+        data: {
+          id: crypto.randomUUID(),
+          userId,
+          computerId: null,
+          checkInAt: now,
+          checkOutAt: null,
+          note: "",
+          createdAt: now,
+          updatedAt: now,
+        },
+      });
+
+      return NextResponse.json({ session }, { status: 201 });
     }
 
-    const existing = await prisma.timeSession.findFirst({
-      where: {
-        userId: { equals: userId, mode: "insensitive" },
-        checkOutAt: null,
-      },
-    });
+    if (body.action === "check-out") {
+      const userId = body.userId?.trim();
+      if (!userId) {
+        return NextResponse.json({ error: "Missing user ID." }, { status: 400 });
+      }
 
-    if (existing) {
-      return NextResponse.json(
-        { error: "User is already checked in." },
-        { status: 409 },
-      );
+      const existing = await prisma.timeSession.findFirst({
+        where: {
+          userId: { equals: userId, mode: "insensitive" },
+          checkOutAt: null,
+        },
+      });
+
+      if (!existing) {
+        return NextResponse.json(
+          { error: "No active session found." },
+          { status: 404 },
+        );
+      }
+
+      const session = await prisma.timeSession.update({
+        where: { id: existing.id },
+        data: {
+          checkOutAt: new Date(),
+          note: body.note?.trim() ?? "",
+          updatedAt: new Date(),
+        },
+      });
+
+      return NextResponse.json({ session });
     }
 
-    const now = new Date();
-    const session = await prisma.timeSession.create({
-      data: {
-        id: crypto.randomUUID(),
-        userId,
-        computerId: null,
-        checkInAt: now,
-        checkOutAt: null,
-        note: "",
-        createdAt: now,
-        updatedAt: now,
-      },
-    });
-
-    return NextResponse.json({ session }, { status: 201 });
+    return NextResponse.json({ error: "Unsupported action." }, { status: 400 });
+  } catch (error) {
+    return NextResponse.json(
+      { error: getErrorMessage(error) },
+      { status: 500 },
+    );
   }
-
-  if (body.action === "check-out") {
-    const userId = body.userId?.trim();
-    if (!userId) {
-      return NextResponse.json({ error: "Missing user ID." }, { status: 400 });
-    }
-
-    const existing = await prisma.timeSession.findFirst({
-      where: {
-        userId: { equals: userId, mode: "insensitive" },
-        checkOutAt: null,
-      },
-    });
-
-    if (!existing) {
-      return NextResponse.json(
-        { error: "No active session found." },
-        { status: 404 },
-      );
-    }
-
-    const session = await prisma.timeSession.update({
-      where: { id: existing.id },
-      data: {
-        checkOutAt: new Date(),
-        note: body.note?.trim() ?? "",
-        updatedAt: new Date(),
-      },
-    });
-
-    return NextResponse.json({ session });
-  }
-
-  return NextResponse.json({ error: "Unsupported action." }, { status: 400 });
 }
