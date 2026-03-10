@@ -9,7 +9,6 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import {
-  DAY_MINUTES,
   MIN_BOOKING_MINUTES,
   SCHEDULE_END_MINUTES,
   SCHEDULE_START_MINUTES,
@@ -26,13 +25,13 @@ import {
   formatHoursAndMinutes,
   formatWeekRange,
   getGroup,
-  getMinutesFromPosition,
   getWeekDays,
   groups,
   hasOverlap,
   minutesToTime,
   parseDateKey,
   sessionDurationMinutes,
+  snapMinutes,
   startOfWeek,
   type Booking,
   type BookingDraft,
@@ -222,13 +221,11 @@ function getBlockStyle(startMinutes: number, endMinutes: number): CSSProperties 
 }
 
 function getScheduleMinutesFromPosition(offset: number, laneHeight: number) {
-  const minutes = getMinutesFromPosition(offset, laneHeight);
   const range = SCHEDULE_END_MINUTES - SCHEDULE_START_MINUTES;
-  const mapped =
-    SCHEDULE_START_MINUTES +
-    (Math.min(DAY_MINUTES, Math.max(0, minutes)) / DAY_MINUTES) * range;
+  const ratio = laneHeight <= 0 ? 0 : Math.min(1, Math.max(0, offset / laneHeight));
+  const mapped = SCHEDULE_START_MINUTES + ratio * range;
 
-  return clampMinutes(mapped);
+  return snapMinutes(clampMinutes(mapped));
 }
 
 function ensureValidTimeRange(
@@ -1539,7 +1536,7 @@ export function SchedulerApp() {
                                   ? VISIBLE_HOUR_MARKERS.map((hour) => (
                                       <span
                                         key={hour}
-                                        className="pointer-events-none absolute left-1 z-[7] rounded-full bg-white/95 px-1 py-0.5 text-[7px] font-semibold uppercase tracking-[0.1em] text-slate-500 shadow-sm"
+                                        className="pointer-events-none absolute left-1 z-[1] rounded-full bg-white/92 px-1 py-0.5 text-[7px] font-semibold uppercase tracking-[0.1em] text-slate-500 shadow-sm"
                                         style={{
                                           top:
                                             hour === SCHEDULE_START_MINUTES / 60
@@ -1556,7 +1553,7 @@ export function SchedulerApp() {
                                     ))
                                   : null}
                                 {showTimeLabels ? (
-                                  <span className="pointer-events-none absolute bottom-1 left-1 z-[7] rounded-full bg-white/95 px-1 py-0.5 text-[7px] font-semibold uppercase tracking-[0.1em] text-slate-500 shadow-sm">
+                                  <span className="pointer-events-none absolute bottom-1 left-1 z-[1] rounded-full bg-white/92 px-1 py-0.5 text-[7px] font-semibold uppercase tracking-[0.1em] text-slate-500 shadow-sm">
                                     17:00
                                   </span>
                                 ) : null}
