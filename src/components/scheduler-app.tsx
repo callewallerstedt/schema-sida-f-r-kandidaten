@@ -1506,16 +1506,18 @@ export function SchedulerApp() {
                         })}
                       </div>
 
-                      <div
-                        className="mt-1 grid gap-1"
-                        style={{
-                          gridTemplateColumns: `repeat(${visibleComputers.length}, minmax(0, 1fr))`,
-                        }}
-                      >
-                        {visibleComputers.map((computer) => {
+                      <div className="relative mt-1">
+                        <div
+                          className="grid gap-1"
+                          style={{
+                            gridTemplateColumns: `repeat(${visibleComputers.length}, minmax(0, 1fr))`,
+                          }}
+                        >
+                          {visibleComputers.map((computer, computerIndex) => {
                           const laneKey = `${computer.id}:${day}`;
                           const laneBookings = bookingsByLane.get(laneKey) ?? [];
                           const computerSurface = getComputerSurface(computer.id);
+                          const showTimeLabels = computerIndex === 0;
 
                           return (
                             <div key={laneKey}>
@@ -1533,27 +1535,31 @@ export function SchedulerApp() {
                                 }}
                               >
                                 <div className="pointer-events-none absolute inset-0 bg-[linear-gradient(180deg,rgba(255,255,255,0.52),transparent_28%,transparent_72%,rgba(15,23,42,0.03))]" />
-                                {VISIBLE_HOUR_MARKERS.map((hour) => (
-                                  <span
-                                    key={hour}
-                                    className="pointer-events-none absolute left-1 z-[6] rounded-full bg-white/95 px-1 py-0.5 text-[7px] font-semibold uppercase tracking-[0.1em] text-slate-500 shadow-sm"
-                                    style={{
-                                      top:
-                                        hour === SCHEDULE_START_MINUTES / 60
-                                          ? "0.35rem"
-                                          : `${((hour * 60 - SCHEDULE_START_MINUTES) / (SCHEDULE_END_MINUTES - SCHEDULE_START_MINUTES)) * 100}%`,
-                                      transform:
-                                        hour === SCHEDULE_START_MINUTES / 60
-                                          ? "none"
-                                          : "translateY(-50%)",
-                                    }}
-                                  >
-                                    {minutesToTime(hour * 60)}
+                                {showTimeLabels
+                                  ? VISIBLE_HOUR_MARKERS.map((hour) => (
+                                      <span
+                                        key={hour}
+                                        className="pointer-events-none absolute left-1 z-[7] rounded-full bg-white/95 px-1 py-0.5 text-[7px] font-semibold uppercase tracking-[0.1em] text-slate-500 shadow-sm"
+                                        style={{
+                                          top:
+                                            hour === SCHEDULE_START_MINUTES / 60
+                                              ? "0.35rem"
+                                              : `${((hour * 60 - SCHEDULE_START_MINUTES) / (SCHEDULE_END_MINUTES - SCHEDULE_START_MINUTES)) * 100}%`,
+                                          transform:
+                                            hour === SCHEDULE_START_MINUTES / 60
+                                              ? "none"
+                                              : "translateY(-50%)",
+                                        }}
+                                      >
+                                        {minutesToTime(hour * 60)}
+                                      </span>
+                                    ))
+                                  : null}
+                                {showTimeLabels ? (
+                                  <span className="pointer-events-none absolute bottom-1 left-1 z-[7] rounded-full bg-white/95 px-1 py-0.5 text-[7px] font-semibold uppercase tracking-[0.1em] text-slate-500 shadow-sm">
+                                    17:00
                                   </span>
-                                ))}
-                                <span className="pointer-events-none absolute bottom-1 left-1 z-[6] rounded-full bg-white/95 px-1 py-0.5 text-[7px] font-semibold uppercase tracking-[0.1em] text-slate-500 shadow-sm">
-                                  17:00
-                                </span>
+                                ) : null}
 
                                 {laneBookings.map((booking) => {
                                   const isResizing =
@@ -1676,122 +1682,122 @@ export function SchedulerApp() {
                             </div>
                           );
                         })}
-                      </div>
+                        </div>
+                        {fullRoomBookings.length > 0 ? (
+                          <div
+                            data-resize-surface="true"
+                            className="pointer-events-none absolute inset-0 z-[4]"
+                          >
+                            {fullRoomBookings.map((displayBooking) => {
+                              const isResizing =
+                                dragState?.kind === "resize" &&
+                                displayBooking.bookingIds.includes(dragState.bookingId);
+                              const renderedBooking = isResizing
+                                ? {
+                                    ...displayBooking.booking,
+                                    startMinutes: dragState.currentStart,
+                                    endMinutes: dragState.currentEnd,
+                                  }
+                                : displayBooking.booking;
+                              const group = getGroup(renderedBooking.groupId);
+                              const isCompact =
+                                renderedBooking.endMinutes -
+                                  renderedBooking.startMinutes <
+                                60;
 
-                      {fullRoomBookings.length > 0 ? (
-                        <div
-                          data-resize-surface="true"
-                          className="pointer-events-none absolute inset-x-0 bottom-0 top-[2.15rem] z-[4]"
-                        >
-                          {fullRoomBookings.map((displayBooking) => {
-                            const isResizing =
-                              dragState?.kind === "resize" &&
-                              displayBooking.bookingIds.includes(dragState.bookingId);
-                            const renderedBooking = isResizing
-                              ? {
-                                  ...displayBooking.booking,
-                                  startMinutes: dragState.currentStart,
-                                  endMinutes: dragState.currentEnd,
-                                }
-                              : displayBooking.booking;
-                            const group = getGroup(renderedBooking.groupId);
-                            const isCompact =
-                              renderedBooking.endMinutes -
-                                renderedBooking.startMinutes <
-                              60;
-
-                            return (
-                              <div
-                                key={displayBooking.key}
-                                className="absolute inset-x-0"
-                                style={getBlockStyle(
-                                  renderedBooking.startMinutes,
-                                  renderedBooking.endMinutes,
-                                )}
-                              >
+                              return (
                                 <div
-                                  className="grid h-full gap-1"
-                                  style={{
-                                    gridTemplateColumns: `repeat(${visibleComputers.length}, minmax(0, 1fr))`,
-                                  }}
+                                  key={displayBooking.key}
+                                  className="absolute inset-x-0"
+                                  style={getBlockStyle(
+                                    renderedBooking.startMinutes,
+                                    renderedBooking.endMinutes,
+                                  )}
                                 >
                                   <div
-                                    data-booking-action="true"
-                                    onClick={() =>
-                                      openEditModal(displayBooking.booking, {
-                                        bookingIds: displayBooking.bookingIds,
-                                        computerIds: displayBooking.computerIds,
-                                        fullRoom: true,
-                                      })
-                                    }
-                                    className="pointer-events-auto relative cursor-pointer rounded-[0.7rem] border px-1.5 pb-1 pt-2 shadow-[0_10px_22px_rgba(15,23,42,0.18)] transition hover:translate-y-[-1px]"
+                                    className="grid h-full gap-1"
                                     style={{
-                                      gridColumn: `${displayBooking.startColumn + 1} / ${displayBooking.endColumn + 2}`,
-                                      borderColor: group.color,
-                                      background: `linear-gradient(180deg, ${group.surfaceColor}, rgba(255,255,255,0.98))`,
+                                      gridTemplateColumns: `repeat(${visibleComputers.length}, minmax(0, 1fr))`,
                                     }}
                                   >
-                                    <button
-                                      type="button"
-                                      aria-label="Resize start"
+                                    <div
                                       data-booking-action="true"
-                                      onPointerDown={(event) =>
-                                        handleResizePointerDown(
-                                          event,
-                                          displayBooking.booking,
-                                          {
-                                            bookingIds: displayBooking.bookingIds,
-                                            fullRoom: true,
-                                          },
-                                          "start",
-                                        )
+                                      onClick={() =>
+                                        openEditModal(displayBooking.booking, {
+                                          bookingIds: displayBooking.bookingIds,
+                                          computerIds: displayBooking.computerIds,
+                                          fullRoom: true,
+                                        })
                                       }
-                                      className="absolute inset-x-0 top-0 h-2.5 cursor-row-resize rounded-t-[0.7rem]"
-                                    />
-                                    <button
-                                      type="button"
-                                      aria-label="Resize end"
-                                      data-booking-action="true"
-                                      onPointerDown={(event) =>
-                                        handleResizePointerDown(
-                                          event,
-                                          displayBooking.booking,
-                                          {
-                                            bookingIds: displayBooking.bookingIds,
-                                            fullRoom: true,
-                                          },
-                                          "end",
-                                        )
-                                      }
-                                      className="absolute inset-x-0 bottom-0 h-2.5 cursor-row-resize rounded-b-[0.7rem]"
-                                    />
-                                    <div className="flex items-start justify-between gap-2">
-                                      <div className="min-w-0">
-                                        <p
-                                          className={`break-words font-semibold leading-tight text-slate-950 ${isCompact ? "text-[8px]" : "text-[9px]"}`}
-                                        >
-                                          {renderedBooking.title}
-                                        </p>
-                                        <p className="mt-0.5 text-[7px] font-medium uppercase tracking-[0.12em] text-slate-600">
-                                          Full room
-                                        </p>
-                                      </div>
-                                      <span
-                                        className="mt-0.5 h-2 w-2 shrink-0 rounded-full"
-                                        style={{ backgroundColor: group.color }}
+                                      className="pointer-events-auto relative cursor-pointer rounded-[0.7rem] border px-1.5 pb-1 pt-2 shadow-[0_10px_22px_rgba(15,23,42,0.18)] transition hover:translate-y-[-1px]"
+                                      style={{
+                                        gridColumn: `${displayBooking.startColumn + 1} / ${displayBooking.endColumn + 2}`,
+                                        borderColor: group.color,
+                                        background: `linear-gradient(180deg, ${group.surfaceColor}, rgba(255,255,255,0.98))`,
+                                      }}
+                                    >
+                                      <button
+                                        type="button"
+                                        aria-label="Resize start"
+                                        data-booking-action="true"
+                                        onPointerDown={(event) =>
+                                          handleResizePointerDown(
+                                            event,
+                                            displayBooking.booking,
+                                            {
+                                              bookingIds: displayBooking.bookingIds,
+                                              fullRoom: true,
+                                            },
+                                            "start",
+                                          )
+                                        }
+                                        className="absolute inset-x-0 top-0 h-2.5 cursor-row-resize rounded-t-[0.7rem]"
                                       />
+                                      <button
+                                        type="button"
+                                        aria-label="Resize end"
+                                        data-booking-action="true"
+                                        onPointerDown={(event) =>
+                                          handleResizePointerDown(
+                                            event,
+                                            displayBooking.booking,
+                                            {
+                                              bookingIds: displayBooking.bookingIds,
+                                              fullRoom: true,
+                                            },
+                                            "end",
+                                          )
+                                        }
+                                        className="absolute inset-x-0 bottom-0 h-2.5 cursor-row-resize rounded-b-[0.7rem]"
+                                      />
+                                      <div className="flex items-start justify-between gap-2">
+                                        <div className="min-w-0">
+                                          <p
+                                            className={`break-words font-semibold leading-tight text-slate-950 ${isCompact ? "text-[8px]" : "text-[9px]"}`}
+                                          >
+                                            {renderedBooking.title}
+                                          </p>
+                                          <p className="mt-0.5 text-[7px] font-medium uppercase tracking-[0.12em] text-slate-600">
+                                            Full room
+                                          </p>
+                                        </div>
+                                        <span
+                                          className="mt-0.5 h-2 w-2 shrink-0 rounded-full"
+                                          style={{ backgroundColor: group.color }}
+                                        />
+                                      </div>
+                                      <p className="mt-0.5 text-[8px] font-medium text-slate-700">
+                                        {minutesToTime(renderedBooking.startMinutes)} -{" "}
+                                        {minutesToTime(renderedBooking.endMinutes)}
+                                      </p>
                                     </div>
-                                    <p className="mt-0.5 text-[8px] font-medium text-slate-700">
-                                      {minutesToTime(renderedBooking.startMinutes)} -{" "}
-                                      {minutesToTime(renderedBooking.endMinutes)}
-                                    </p>
                                   </div>
                                 </div>
-                              </div>
-                            );
-                          })}
-                        </div>
-                      ) : null}
+                              );
+                            })}
+                          </div>
+                        ) : null}
+                      </div>
                     </div>
                   </section>
                 );
