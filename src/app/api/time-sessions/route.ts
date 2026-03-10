@@ -12,6 +12,12 @@ type CheckOutBody = {
   note?: string;
 };
 
+type UpdateNoteBody = {
+  action: "update-note";
+  userId: string;
+  note?: string;
+};
+
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Unexpected server error.";
 }
@@ -33,7 +39,7 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const body = (await request.json()) as CheckInBody | CheckOutBody;
+    const body = (await request.json()) as CheckInBody | CheckOutBody | UpdateNoteBody;
 
     if (body.action === "check-in") {
       const userId = body.userId?.trim();
@@ -97,6 +103,37 @@ export async function POST(request: Request) {
         data: {
           checkOutAt: new Date(),
           note: body.note?.trim() ?? "",
+          updatedAt: new Date(),
+        },
+      });
+
+      return NextResponse.json({ session });
+    }
+
+    if (body.action === "update-note") {
+      const userId = body.userId?.trim();
+      if (!userId) {
+        return NextResponse.json({ error: "Missing user ID." }, { status: 400 });
+      }
+
+      const existing = await prisma.timeSession.findFirst({
+        where: {
+          userId: { equals: userId, mode: "insensitive" },
+          checkOutAt: null,
+        },
+      });
+
+      if (!existing) {
+        return NextResponse.json(
+          { error: "No active session found." },
+          { status: 404 },
+        );
+      }
+
+      const session = await prisma.timeSession.update({
+        where: { id: existing.id },
+        data: {
+          note: body.note ?? "",
           updatedAt: new Date(),
         },
       });

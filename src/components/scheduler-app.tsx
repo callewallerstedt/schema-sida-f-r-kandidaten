@@ -339,6 +339,7 @@ export function SchedulerApp() {
   const [trackingUserId, setTrackingUserId] = useState("");
   const [trackingViewerUserId, setTrackingViewerUserId] = useState("");
   const [checkoutNote, setCheckoutNote] = useState("");
+  const [isCheckoutNoteDirty, setIsCheckoutNoteDirty] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const [isDataLoading, setIsDataLoading] = useState(true);
 
@@ -785,6 +786,61 @@ export function SchedulerApp() {
     );
   }, [normalizedTrackingViewerUserId, timeSessions]);
 
+  useEffect(() => {
+    if (!activeSessionForUser) {
+      setCheckoutNote("");
+      setIsCheckoutNoteDirty(false);
+      return;
+    }
+
+    setCheckoutNote(activeSessionForUser.note);
+    setIsCheckoutNoteDirty(false);
+  }, [activeSessionForUser]);
+
+  useEffect(() => {
+    if (!activeSessionForUser || !isCheckoutNoteDirty) {
+      return;
+    }
+
+    if (checkoutNote === activeSessionForUser.note) {
+      setIsCheckoutNoteDirty(false);
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const response = await fetch("/api/time-sessions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              action: "update-note",
+              userId: activeSessionForUser.userId,
+              note: checkoutNote,
+            }),
+          });
+          const body = await parseJsonResponse<{ session: TimeSession }>(response);
+          setTimeSessions((currentSessions) =>
+            currentSessions.map((session) =>
+              session.id === body.session.id ? body.session : session,
+            ),
+          );
+          setIsCheckoutNoteDirty(false);
+        } catch (error) {
+          setToast(
+            error instanceof Error
+              ? error.message
+              : "Failed to save note.",
+          );
+        }
+      })();
+    }, 500);
+
+    return () => window.clearTimeout(timeout);
+  }, [activeSessionForUser, checkoutNote, isCheckoutNoteDirty]);
+
   const activeSessions = useMemo(
     () => timeSessions.filter((session) => session.checkOutAt === null),
     [timeSessions],
@@ -1209,7 +1265,8 @@ export function SchedulerApp() {
       });
       const body = await parseJsonResponse<{ session: TimeSession }>(response);
       setTimeSessions((currentSessions) => [body.session, ...currentSessions]);
-      setCheckoutNote("");
+      setCheckoutNote(body.session.note);
+      setIsCheckoutNoteDirty(false);
       setToast(`Checked in ${normalizedTrackingViewerUserId}.`);
     } catch (error) {
       setToast(
@@ -1243,6 +1300,7 @@ export function SchedulerApp() {
         ),
       );
       setCheckoutNote("");
+      setIsCheckoutNoteDirty(false);
       setToast(`Checked out ${activeSessionForUser.userId}.`);
     } catch (error) {
       setToast(
@@ -1259,12 +1317,14 @@ export function SchedulerApp() {
 
     setTrackingViewerUserId(normalizedTrackingUserId);
     setCheckoutNote("");
+    setIsCheckoutNoteDirty(false);
   };
 
   const handleTrackingLogout = () => {
     setTrackingViewerUserId("");
     setTrackingUserId("");
     setCheckoutNote("");
+    setIsCheckoutNoteDirty(false);
   };
 
   if (!weekStart || isDataLoading) {
@@ -1838,7 +1898,13 @@ export function SchedulerApp() {
 
             <div className="mt-4 grid gap-3">
               {!normalizedTrackingViewerUserId ? (
-                <div className="grid gap-3 md:grid-cols-[1fr_auto]">
+                <form
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    handleTrackingLogin();
+                  }}
+                  className="grid gap-3 md:grid-cols-[1fr_auto]"
+                >
                   <label className="grid gap-2">
                     <span className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
                       User ID
@@ -1853,14 +1919,13 @@ export function SchedulerApp() {
                   </label>
                   <div className="flex items-end">
                     <button
-                      type="button"
-                      onClick={handleTrackingLogin}
+                      type="submit"
                       className="w-full rounded-full bg-slate-950 px-4 py-2.5 text-sm font-medium text-white shadow-[0_12px_24px_rgba(15,23,42,0.25)] transition hover:translate-y-[-1px] hover:shadow-[0_16px_30px_rgba(15,23,42,0.28)]"
                     >
                       Login
                     </button>
                   </div>
-                </div>
+                </form>
               ) : (
                 <>
                   <div className="rounded-[1rem] border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-600">
@@ -1939,7 +2004,10 @@ export function SchedulerApp() {
                         </span>
                         <textarea
                           value={checkoutNote}
-                          onChange={(event) => setCheckoutNote(event.target.value)}
+                          onChange={(event) => {
+                            setCheckoutNote(event.target.value);
+                            setIsCheckoutNoteDirty(true);
+                          }}
                           rows={3}
                           placeholder="Short description of what you did"
                           className="rounded-[1rem] border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-950 outline-none transition focus:border-slate-950"
