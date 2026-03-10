@@ -337,6 +337,7 @@ export function SchedulerApp() {
   const [toast, setToast] = useState<string | null>(null);
   const [trackingModalOpen, setTrackingModalOpen] = useState(false);
   const [trackingUserId, setTrackingUserId] = useState("");
+  const [trackingViewerUserId, setTrackingViewerUserId] = useState("");
   const [checkoutNote, setCheckoutNote] = useState("");
   const [now, setNow] = useState(() => Date.now());
   const [isDataLoading, setIsDataLoading] = useState(true);
@@ -767,66 +768,51 @@ export function SchedulerApp() {
   }, [visibleComputers, weekBookings]);
 
   const normalizedTrackingUserId = trackingUserId.trim();
+  const normalizedTrackingViewerUserId = trackingViewerUserId.trim();
 
   const activeSessionForUser = useMemo(() => {
-    if (!normalizedTrackingUserId) {
+    if (!normalizedTrackingViewerUserId) {
       return null;
     }
 
     return (
       timeSessions.find(
         (session) =>
-          session.userId.toLowerCase() === normalizedTrackingUserId.toLowerCase() &&
+          session.userId.toLowerCase() ===
+            normalizedTrackingViewerUserId.toLowerCase() &&
           session.checkOutAt === null,
       ) ?? null
     );
-  }, [normalizedTrackingUserId, timeSessions]);
-
-  const timeTotalsByUser = useMemo(() => {
-    const totals = new Map<
-      string,
-      {
-        userId: string;
-        totalMinutes: number;
-        active: boolean;
-        sessionCount: number;
-      }
-    >();
-
-    for (const session of timeSessions) {
-      const existing = totals.get(session.userId) ?? {
-        userId: session.userId,
-        totalMinutes: 0,
-        active: false,
-        sessionCount: 0,
-      };
-
-      existing.totalMinutes += sessionDurationMinutes(session, now);
-      existing.active = existing.active || session.checkOutAt === null;
-      existing.sessionCount += 1;
-      totals.set(session.userId, existing);
-    }
-
-    return [...totals.values()].sort(
-      (left, right) => right.totalMinutes - left.totalMinutes,
-    );
-  }, [now, timeSessions]);
+  }, [normalizedTrackingViewerUserId, timeSessions]);
 
   const activeSessions = useMemo(
     () => timeSessions.filter((session) => session.checkOutAt === null),
     [timeSessions],
   );
 
-  const recentSessions = useMemo(
-    () =>
-      [...timeSessions]
-        .sort(
-          (left, right) =>
-            new Date(right.checkInAt).getTime() - new Date(left.checkInAt).getTime(),
-        )
-        .slice(0, 8),
-    [timeSessions],
-  );
+  const sessionsForViewer = useMemo(() => {
+    if (!normalizedTrackingViewerUserId) {
+      return [];
+    }
+
+    return [...timeSessions]
+      .filter(
+        (session) =>
+          session.userId.toLowerCase() ===
+          normalizedTrackingViewerUserId.toLowerCase(),
+      )
+      .sort(
+        (left, right) =>
+          new Date(right.checkInAt).getTime() - new Date(left.checkInAt).getTime(),
+      );
+  }, [normalizedTrackingViewerUserId, timeSessions]);
+
+  const viewerTotalMinutes = useMemo(() => {
+    return sessionsForViewer.reduce(
+      (total, session) => total + sessionDurationMinutes(session, now),
+      0,
+    );
+  }, [now, sessionsForViewer]);
 
   const editorError = useMemo(() => {
     if (!editorState) {
@@ -1200,8 +1186,8 @@ export function SchedulerApp() {
   };
 
   const handleCheckIn = async () => {
-    if (!normalizedTrackingUserId) {
-      setToast("Enter a user ID before checking in.");
+    if (!normalizedTrackingViewerUserId) {
+      setToast("Log in with a user ID before checking in.");
       return;
     }
 
@@ -1218,13 +1204,13 @@ export function SchedulerApp() {
         },
         body: JSON.stringify({
           action: "check-in",
-          userId: normalizedTrackingUserId,
+          userId: normalizedTrackingViewerUserId,
         }),
       });
       const body = await parseJsonResponse<{ session: TimeSession }>(response);
       setTimeSessions((currentSessions) => [body.session, ...currentSessions]);
       setCheckoutNote("");
-      setToast(`Checked in ${normalizedTrackingUserId}.`);
+      setToast(`Checked in ${normalizedTrackingViewerUserId}.`);
     } catch (error) {
       setToast(
         error instanceof Error ? error.message : "Failed to check in.",
@@ -1263,6 +1249,22 @@ export function SchedulerApp() {
         error instanceof Error ? error.message : "Failed to check out.",
       );
     }
+  };
+
+  const handleTrackingLogin = () => {
+    if (!normalizedTrackingUserId) {
+      setToast("Enter a user ID to log in.");
+      return;
+    }
+
+    setTrackingViewerUserId(normalizedTrackingUserId);
+    setCheckoutNote("");
+  };
+
+  const handleTrackingLogout = () => {
+    setTrackingViewerUserId("");
+    setTrackingUserId("");
+    setCheckoutNote("");
   };
 
   if (!weekStart || isDataLoading) {
@@ -1587,7 +1589,7 @@ export function SchedulerApp() {
                                           renderedBooking.endMinutes,
                                         ),
                                         borderColor: group.color,
-                                        background: `linear-gradient(180deg, ${group.surfaceColor}, rgba(255,255,255,0.94))`,
+                                        background: `linear-gradient(180deg, ${group.accentColor}, rgba(255,255,255,0.985))`,
                                       }}
                                     >
                                       <button
@@ -1730,7 +1732,7 @@ export function SchedulerApp() {
                                       style={{
                                         gridColumn: `${displayBooking.startColumn + 1} / ${displayBooking.endColumn + 2}`,
                                         borderColor: group.color,
-                                        background: `linear-gradient(180deg, ${group.surfaceColor}, rgba(255,255,255,0.98))`,
+                                        background: `linear-gradient(180deg, ${group.accentColor}, rgba(255,255,255,0.985))`,
                                       }}
                                     >
                                       <button
@@ -1835,148 +1837,158 @@ export function SchedulerApp() {
             </div>
 
             <div className="mt-4 grid gap-3">
-              <div className="grid gap-3 md:grid-cols-[1fr_auto]">
-                <label className="grid gap-2">
-                  <span className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
-                    User ID
-                  </span>
-                  <input
-                    type="text"
-                    value={trackingUserId}
-                    onChange={(event) => setTrackingUserId(event.target.value)}
-                    placeholder="example: user-1024"
-                    className="rounded-[1rem] border border-slate-300 bg-slate-50 px-3 py-2.5 text-base text-slate-950 outline-none transition focus:border-slate-950"
-                  />
-                </label>
-                <div className="flex items-end">
-                  {activeSessionForUser ? (
-                    <button
-                      type="button"
-                      onClick={handleCheckOut}
-                      className="w-full rounded-full bg-slate-950 px-4 py-2.5 text-sm font-medium text-white shadow-[0_12px_24px_rgba(15,23,42,0.25)] transition hover:translate-y-[-1px] hover:shadow-[0_16px_30px_rgba(15,23,42,0.28)]"
-                    >
-                      Check out
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={handleCheckIn}
-                      className="w-full rounded-full bg-slate-950 px-4 py-2.5 text-sm font-medium text-white shadow-[0_12px_24px_rgba(15,23,42,0.25)] transition hover:translate-y-[-1px] hover:shadow-[0_16px_30px_rgba(15,23,42,0.28)]"
-                    >
-                      Check in
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {activeSessionForUser ? (
-                <div className="rounded-[1rem] border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-600">
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div>
-                      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
-                        Active session
-                      </p>
-                      <p className="mt-1 text-base font-semibold text-slate-950">
-                        {activeSessionForUser.userId}
-                      </p>
-                    </div>
-                    <p className="text-sm font-medium text-slate-950">
-                      {formatHoursAndMinutes(
-                        sessionDurationMinutes(activeSessionForUser, now),
-                      )}
-                    </p>
-                  </div>
-                  <p className="mt-2 text-sm text-slate-600">
-                    Checked in {new Date(activeSessionForUser.checkInAt).toLocaleString("en-GB")}
-                  </p>
-                  <label className="mt-4 grid gap-2">
+              {!normalizedTrackingViewerUserId ? (
+                <div className="grid gap-3 md:grid-cols-[1fr_auto]">
+                  <label className="grid gap-2">
                     <span className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
-                      Checkout note
+                      User ID
                     </span>
-                    <textarea
-                      value={checkoutNote}
-                      onChange={(event) => setCheckoutNote(event.target.value)}
-                      rows={3}
-                      placeholder="Short description of what you did"
-                      className="rounded-[1rem] border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-950 outline-none transition focus:border-slate-950"
+                    <input
+                      type="text"
+                      value={trackingUserId}
+                      onChange={(event) => setTrackingUserId(event.target.value)}
+                      placeholder="example: user-1024"
+                      className="rounded-[1rem] border border-slate-300 bg-slate-50 px-3 py-2.5 text-base text-slate-950 outline-none transition focus:border-slate-950"
                     />
                   </label>
-                </div>
-              ) : null}
-
-              <div className="grid gap-4 md:grid-cols-2">
-                <div className="rounded-[1rem] border border-slate-200 bg-slate-50 px-3 py-3">
-                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
-                    User totals
-                  </p>
-                  <div className="mt-3 grid gap-2">
-                    {timeTotalsByUser.length === 0 ? (
-                      <p className="text-sm text-slate-500">No tracked time yet.</p>
-                    ) : (
-                      timeTotalsByUser.slice(0, 6).map((entry) => (
-                        <div
-                          key={entry.userId}
-                          className="flex items-center justify-between gap-3 rounded-[0.9rem] border border-slate-200 bg-white px-3 py-2.5"
-                        >
-                          <div>
-                            <p className="text-sm font-semibold text-slate-950">
-                              {entry.userId}
-                            </p>
-                            <p className="mt-1 text-[10px] uppercase tracking-[0.18em] text-slate-500">
-                              {entry.sessionCount} session{entry.sessionCount === 1 ? "" : "s"}
-                              {entry.active ? " active" : ""}
-                            </p>
-                          </div>
-                          <p className="text-sm font-medium text-slate-950">
-                            {formatHoursAndMinutes(entry.totalMinutes)}
-                          </p>
-                        </div>
-                      ))
-                    )}
+                  <div className="flex items-end">
+                    <button
+                      type="button"
+                      onClick={handleTrackingLogin}
+                      className="w-full rounded-full bg-slate-950 px-4 py-2.5 text-sm font-medium text-white shadow-[0_12px_24px_rgba(15,23,42,0.25)] transition hover:translate-y-[-1px] hover:shadow-[0_16px_30px_rgba(15,23,42,0.28)]"
+                    >
+                      Login
+                    </button>
                   </div>
                 </div>
-
-                <div className="rounded-[1rem] border border-slate-200 bg-slate-50 px-3 py-3">
-                  <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
-                    Recent activity
-                  </p>
-                  <div className="mt-3 grid gap-2">
-                    {recentSessions.length === 0 ? (
-                      <p className="text-sm text-slate-500">No time entries saved yet.</p>
-                    ) : (
-                      recentSessions.map((session) => (
-                        <div
-                          key={session.id}
-                          className="rounded-[0.9rem] border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-600"
+              ) : (
+                <>
+                  <div className="rounded-[1rem] border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-600">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+                          Logged in as
+                        </p>
+                        <p className="mt-1 text-base font-semibold text-slate-950">
+                          {trackingViewerUserId}
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span
+                          className={`rounded-full px-3 py-1 text-[11px] font-medium ${activeSessionForUser ? "bg-emerald-100 text-emerald-700" : "bg-slate-200 text-slate-700"}`}
                         >
-                          <div className="flex items-center justify-between gap-3">
-                            <p className="font-semibold text-slate-950">
-                              {session.userId}
-                            </p>
-                            <p className="text-[10px] uppercase tracking-[0.18em] text-slate-500">
-                              {session.checkOutAt ? "Completed" : "Checked in"}
-                            </p>
-                          </div>
-                          <p className="mt-2">
-                            {new Date(session.checkInAt).toLocaleString("en-GB")} -{" "}
-                            {session.checkOutAt
-                              ? new Date(session.checkOutAt).toLocaleString("en-GB")
-                              : "Active"}
-                          </p>
-                          <p className="mt-1">
-                            {formatHoursAndMinutes(sessionDurationMinutes(session, now))}
-                          </p>
-                          {session.note ? (
-                            <p className="mt-2 rounded-lg bg-slate-50 px-2 py-2 text-xs text-slate-600">
-                              {session.note}
-                            </p>
-                          ) : null}
-                        </div>
-                      ))
-                    )}
+                          {activeSessionForUser ? "Active" : "Not active"}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={handleTrackingLogout}
+                          className="rounded-full border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 transition hover:border-slate-950 hover:text-slate-950"
+                        >
+                          Change user
+                        </button>
+                      </div>
+                    </div>
+                    <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+                      <p className="text-sm text-slate-600">
+                        Total tracked:{" "}
+                        <span className="font-semibold text-slate-950">
+                          {formatHoursAndMinutes(viewerTotalMinutes)}
+                        </span>
+                      </p>
+                      {activeSessionForUser ? (
+                        <button
+                          type="button"
+                          onClick={handleCheckOut}
+                          className="rounded-full bg-slate-950 px-4 py-2 text-sm font-medium text-white shadow-[0_12px_24px_rgba(15,23,42,0.25)] transition hover:translate-y-[-1px] hover:shadow-[0_16px_30px_rgba(15,23,42,0.28)]"
+                        >
+                          Check out
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={handleCheckIn}
+                          className="rounded-full bg-slate-950 px-4 py-2 text-sm font-medium text-white shadow-[0_12px_24px_rgba(15,23,42,0.25)] transition hover:translate-y-[-1px] hover:shadow-[0_16px_30px_rgba(15,23,42,0.28)]"
+                        >
+                          Check in
+                        </button>
+                      )}
+                    </div>
                   </div>
-                </div>
-              </div>
+
+                  {activeSessionForUser ? (
+                    <div className="rounded-[1rem] border border-slate-200 bg-slate-50 px-3 py-3 text-sm text-slate-600">
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+                            Current session
+                          </p>
+                          <p className="mt-1 text-base font-semibold text-slate-950">
+                            {formatHoursAndMinutes(
+                              sessionDurationMinutes(activeSessionForUser, now),
+                            )}
+                          </p>
+                        </div>
+                        <p className="text-sm text-slate-600">
+                          Since{" "}
+                          {new Date(activeSessionForUser.checkInAt).toLocaleString("en-GB")}
+                        </p>
+                      </div>
+                      <label className="mt-4 grid gap-2">
+                        <span className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+                          Checkout note
+                        </span>
+                        <textarea
+                          value={checkoutNote}
+                          onChange={(event) => setCheckoutNote(event.target.value)}
+                          rows={3}
+                          placeholder="Short description of what you did"
+                          className="rounded-[1rem] border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-950 outline-none transition focus:border-slate-950"
+                        />
+                      </label>
+                    </div>
+                  ) : null}
+
+                  <div className="rounded-[1rem] border border-slate-200 bg-slate-50 px-3 py-3">
+                    <p className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+                      Your logs
+                    </p>
+                    <div className="mt-3 grid gap-2">
+                      {sessionsForViewer.length === 0 ? (
+                        <p className="text-sm text-slate-500">No logs for this user yet.</p>
+                      ) : (
+                        sessionsForViewer.slice(0, 8).map((session) => (
+                          <div
+                            key={session.id}
+                            className="rounded-[0.9rem] border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-600"
+                          >
+                            <div className="flex items-center justify-between gap-3">
+                              <p className="font-semibold text-slate-950">
+                                {session.checkOutAt ? "Completed" : "Active"}
+                              </p>
+                              <p className="text-[10px] uppercase tracking-[0.18em] text-slate-500">
+                                {formatHoursAndMinutes(
+                                  sessionDurationMinutes(session, now),
+                                )}
+                              </p>
+                            </div>
+                            <p className="mt-2">
+                              {new Date(session.checkInAt).toLocaleString("en-GB")} -{" "}
+                              {session.checkOutAt
+                                ? new Date(session.checkOutAt).toLocaleString("en-GB")
+                                : "Open"}
+                            </p>
+                            {session.note ? (
+                              <p className="mt-2 rounded-lg bg-slate-50 px-2 py-2 text-xs text-slate-600">
+                                {session.note}
+                              </p>
+                            ) : null}
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         </div>
