@@ -331,6 +331,11 @@ function formatDateTimeLocalInput(date: Date) {
   return `${year}-${month}-${day}T${hours}:${minutes}`;
 }
 
+function localInputToIsoString(value: string) {
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toISOString();
+}
+
 export function SchedulerApp() {
   const [initialState] = useState(loadInitialState);
   const [bookings, setBookings] = useState<Booking[]>(initialState.bookings);
@@ -1279,7 +1284,7 @@ export function SchedulerApp() {
         body: JSON.stringify({
           action: "check-in",
           userId: normalizedTrackingViewerUserId,
-          checkInAt: trackingCheckInAt,
+          checkInAt: localInputToIsoString(trackingCheckInAt),
         }),
       });
       const body = await parseJsonResponse<{ session: TimeSession }>(response);
@@ -1310,7 +1315,7 @@ export function SchedulerApp() {
           action: "check-out",
           userId: activeSessionForUser.userId,
           note: checkoutNote.trim(),
-          checkOutAt: trackingCheckOutAt,
+          checkOutAt: localInputToIsoString(trackingCheckOutAt),
         }),
       });
       const body = await parseJsonResponse<{ session: TimeSession }>(response);
@@ -1400,7 +1405,7 @@ export function SchedulerApp() {
 
     try {
       const session = await updateTimeSession(activeSessionForUser.id, {
-        checkInAt: trackingCheckInAt,
+        checkInAt: localInputToIsoString(trackingCheckInAt),
       });
       setTrackingCheckInAt(formatDateTimeLocalInput(new Date(session.checkInAt)));
       setToast(`Updated check-in time for ${activeSessionForUser.userId}.`);
