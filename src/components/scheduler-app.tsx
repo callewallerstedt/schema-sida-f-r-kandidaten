@@ -1351,6 +1351,77 @@ export function SchedulerApp() {
     setTrackingCheckOutAt(formatDateTimeLocalInput(new Date()));
   };
 
+  const updateTimeSession = async (
+    sessionId: string,
+    payload: {
+      checkInAt?: string;
+      checkOutAt?: string | null;
+      note?: string;
+    },
+  ) => {
+    const response = await fetch("/api/time-sessions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        action: "update-session",
+        sessionId,
+        ...payload,
+      }),
+    });
+    const body = await parseJsonResponse<{ session: TimeSession }>(response);
+    setTimeSessions((currentSessions) =>
+      currentSessions.map((session) =>
+        session.id === body.session.id ? body.session : session,
+      ),
+    );
+    return body.session;
+  };
+
+  const deleteTimeSession = async (sessionId: string) => {
+    const response = await fetch("/api/time-sessions", {
+      method: "DELETE",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ id: sessionId }),
+    });
+    await parseJsonResponse<{ ok: boolean }>(response);
+    setTimeSessions((currentSessions) =>
+      currentSessions.filter((session) => session.id !== sessionId),
+    );
+  };
+
+  const handleSaveActiveCheckInTime = async () => {
+    if (!activeSessionForUser) {
+      return;
+    }
+
+    try {
+      const session = await updateTimeSession(activeSessionForUser.id, {
+        checkInAt: trackingCheckInAt,
+      });
+      setTrackingCheckInAt(formatDateTimeLocalInput(new Date(session.checkInAt)));
+      setToast(`Updated check-in time for ${activeSessionForUser.userId}.`);
+    } catch (error) {
+      setToast(
+        error instanceof Error ? error.message : "Failed to update check-in time.",
+      );
+    }
+  };
+
+  const handleDeleteTimeSession = async (sessionId: string) => {
+    try {
+      await deleteTimeSession(sessionId);
+      setToast("Deleted log.");
+    } catch (error) {
+      setToast(
+        error instanceof Error ? error.message : "Failed to delete log.",
+      );
+    }
+  };
+
   if (!weekStart || isDataLoading) {
     return (
       <main className="min-h-screen bg-[var(--page-background)] px-6 py-8 text-[var(--foreground)]">
@@ -2065,6 +2136,26 @@ export function SchedulerApp() {
                           {new Date(activeSessionForUser.checkInAt).toLocaleString("en-GB")}
                         </p>
                       </div>
+                      <div className="mt-4 grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
+                        <label className="grid gap-2">
+                          <span className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+                            Check-in time
+                          </span>
+                          <input
+                            type="datetime-local"
+                            value={trackingCheckInAt}
+                            onChange={(event) => setTrackingCheckInAt(event.target.value)}
+                            className="rounded-[1rem] border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-950 outline-none transition focus:border-slate-950"
+                          />
+                        </label>
+                        <button
+                          type="button"
+                          onClick={handleSaveActiveCheckInTime}
+                          className="rounded-full border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-950 hover:text-slate-950"
+                        >
+                          Save start time
+                        </button>
+                      </div>
                       <label className="mt-4 grid gap-2">
                         <span className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
                           Checkout note
@@ -2100,11 +2191,20 @@ export function SchedulerApp() {
                               <p className="font-semibold text-slate-950">
                                 {session.checkOutAt ? "Completed" : "Active"}
                               </p>
-                              <p className="text-[10px] uppercase tracking-[0.18em] text-slate-500">
-                                {formatHoursAndMinutes(
-                                  sessionDurationMinutes(session, now),
-                                )}
-                              </p>
+                              <div className="flex items-center gap-2">
+                                <p className="text-[10px] uppercase tracking-[0.18em] text-slate-500">
+                                  {formatHoursAndMinutes(
+                                    sessionDurationMinutes(session, now),
+                                  )}
+                                </p>
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteTimeSession(session.id)}
+                                  className="rounded-full border border-[var(--danger)]/25 bg-[var(--danger-soft)] px-2.5 py-1 text-[10px] font-medium uppercase tracking-[0.12em] text-[var(--danger)] transition hover:border-[var(--danger)]/45"
+                                >
+                                  Delete
+                                </button>
+                              </div>
                             </div>
                             <p className="mt-2">
                               {new Date(session.checkInAt).toLocaleString("en-GB")} -{" "}

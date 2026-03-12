@@ -20,6 +20,14 @@ type UpdateNoteBody = {
   note?: string;
 };
 
+type UpdateSessionBody = {
+  action: "update-session";
+  sessionId: string;
+  checkInAt?: string;
+  checkOutAt?: string | null;
+  note?: string;
+};
+
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Unexpected server error.";
 }
@@ -50,7 +58,11 @@ export async function GET() {
 
 export async function POST(request: Request) {
   try {
-    const body = (await request.json()) as CheckInBody | CheckOutBody | UpdateNoteBody;
+    const body = (await request.json()) as
+      | CheckInBody
+      | CheckOutBody
+      | UpdateNoteBody
+      | UpdateSessionBody;
 
     if (body.action === "check-in") {
       const userId = body.userId?.trim();
@@ -160,7 +172,73 @@ export async function POST(request: Request) {
       return NextResponse.json({ session });
     }
 
+    if (body.action === "update-session") {
+      if (typeof body.sessionId !== "string" || !body.sessionId.trim()) {
+        return NextResponse.json({ error: "Missing session ID." }, { status: 400 });
+      }
+
+      const existing = await prisma.timeSession.findUnique({
+        where: { id: body.sessionId },
+      });
+
+      if (!existing) {
+        return NextResponse.json(
+          { error: "Session not found." },
+          { status: 404 },
+        );
+      }
+
+      const nextCheckInAt = parseOptionalDate(body.checkInAt) ?? existing.checkInAt;
+      const nextCheckOutAt =
+        body.checkOutAt === null
+          ? null
+          : parseOptionalDate(body.checkOutAt) ?? existing.checkOutAt;
+
+      if (
+        nextCheckOutAt &&
+        nextCheckOutAt.getTime() < nextCheckInAt.getTime()
+      ) {
+        return NextResponse.json(
+          { error: "Check-out time cannot be earlier than check-in time." },
+          { status: 400 },
+        );
+      }
+
+      const session = await prisma.timeSession.update({
+        where: { id: body.sessionId },
+        data: {
+          checkInAt: nextCheckInAt,
+          checkOutAt: nextCheckOutAt,
+          note: typeof body.note === "string" ? body.note : existing.note,
+          updatedAt: new Date(),
+        },
+      });
+
+      return NextResponse.json({ session });
+    }
+
     return NextResponse.json({ error: "Unsupported action." }, { status: 400 });
+  } catch (error) {
+    return NextResponse.json(
+      { error: getErrorMessage(error) },
+      { status: 500 },
+    );
+  }
+}
+
+export async function DELETE(request: Request) {
+  try {
+    const body = (await request.json()) as { id?: unknown };
+
+    if (typeof body.id !== "string" || !body.id.trim()) {
+      return NextResponse.json({ error: "Missing session ID." }, { status: 400 });
+    }
+
+    await prisma.timeSession.delete({
+      where: { id: body.id },
+    });
+
+    return NextResponse.json({ ok: true });
   } catch (error) {
     return NextResponse.json(
       { error: getErrorMessage(error) },
