@@ -321,6 +321,16 @@ async function parseJsonResponse<T>(response: Response): Promise<T> {
   return body;
 }
 
+function formatDateTimeLocalInput(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const hours = String(date.getHours()).padStart(2, "0");
+  const minutes = String(date.getMinutes()).padStart(2, "0");
+
+  return `${year}-${month}-${day}T${hours}:${minutes}`;
+}
+
 export function SchedulerApp() {
   const [initialState] = useState(loadInitialState);
   const [bookings, setBookings] = useState<Booking[]>(initialState.bookings);
@@ -340,6 +350,12 @@ export function SchedulerApp() {
   const [trackingViewerUserId, setTrackingViewerUserId] = useState("");
   const [checkoutNote, setCheckoutNote] = useState("");
   const [isCheckoutNoteDirty, setIsCheckoutNoteDirty] = useState(false);
+  const [trackingCheckInAt, setTrackingCheckInAt] = useState(() =>
+    formatDateTimeLocalInput(new Date()),
+  );
+  const [trackingCheckOutAt, setTrackingCheckOutAt] = useState(() =>
+    formatDateTimeLocalInput(new Date()),
+  );
   const [now, setNow] = useState(() => Date.now());
   const [isDataLoading, setIsDataLoading] = useState(true);
 
@@ -790,11 +806,13 @@ export function SchedulerApp() {
     if (!activeSessionForUser) {
       setCheckoutNote("");
       setIsCheckoutNoteDirty(false);
+      setTrackingCheckInAt(formatDateTimeLocalInput(new Date()));
       return;
     }
 
     setCheckoutNote(activeSessionForUser.note);
     setIsCheckoutNoteDirty(false);
+    setTrackingCheckOutAt(formatDateTimeLocalInput(new Date()));
   }, [activeSessionForUser]);
 
   useEffect(() => {
@@ -1261,6 +1279,7 @@ export function SchedulerApp() {
         body: JSON.stringify({
           action: "check-in",
           userId: normalizedTrackingViewerUserId,
+          checkInAt: trackingCheckInAt,
         }),
       });
       const body = await parseJsonResponse<{ session: TimeSession }>(response);
@@ -1291,6 +1310,7 @@ export function SchedulerApp() {
           action: "check-out",
           userId: activeSessionForUser.userId,
           note: checkoutNote.trim(),
+          checkOutAt: trackingCheckOutAt,
         }),
       });
       const body = await parseJsonResponse<{ session: TimeSession }>(response);
@@ -1318,6 +1338,8 @@ export function SchedulerApp() {
     setTrackingViewerUserId(normalizedTrackingUserId);
     setCheckoutNote("");
     setIsCheckoutNoteDirty(false);
+    setTrackingCheckInAt(formatDateTimeLocalInput(new Date()));
+    setTrackingCheckOutAt(formatDateTimeLocalInput(new Date()));
   };
 
   const handleTrackingLogout = () => {
@@ -1325,6 +1347,8 @@ export function SchedulerApp() {
     setTrackingUserId("");
     setCheckoutNote("");
     setIsCheckoutNoteDirty(false);
+    setTrackingCheckInAt(formatDateTimeLocalInput(new Date()));
+    setTrackingCheckOutAt(formatDateTimeLocalInput(new Date()));
   };
 
   if (!weekStart || isDataLoading) {
@@ -1979,13 +2003,30 @@ export function SchedulerApp() {
                         </button>
                       </div>
                     </div>
-                    <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-                      <p className="text-sm text-slate-600">
-                        Total tracked:{" "}
-                        <span className="font-semibold text-slate-950">
-                          {formatHoursAndMinutes(viewerTotalMinutes)}
-                        </span>
-                      </p>
+                    <div className="mt-3 grid gap-3 md:grid-cols-[1fr_auto] md:items-end">
+                      <div className="grid gap-3 md:grid-cols-2">
+                        <p className="self-end text-sm text-slate-600">
+                          Total tracked:{" "}
+                          <span className="font-semibold text-slate-950">
+                            {formatHoursAndMinutes(viewerTotalMinutes)}
+                          </span>
+                        </p>
+                        <label className="grid gap-2">
+                          <span className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">
+                            {activeSessionForUser ? "Check-out time" : "Check-in time"}
+                          </span>
+                          <input
+                            type="datetime-local"
+                            value={activeSessionForUser ? trackingCheckOutAt : trackingCheckInAt}
+                            onChange={(event) =>
+                              activeSessionForUser
+                                ? setTrackingCheckOutAt(event.target.value)
+                                : setTrackingCheckInAt(event.target.value)
+                            }
+                            className="rounded-[1rem] border border-slate-300 bg-white px-3 py-2.5 text-sm text-slate-950 outline-none transition focus:border-slate-950"
+                          />
+                        </label>
+                      </div>
                       {activeSessionForUser ? (
                         <button
                           type="button"

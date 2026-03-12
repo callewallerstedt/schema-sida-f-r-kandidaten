@@ -4,12 +4,14 @@ import { prisma } from "@/lib/prisma";
 type CheckInBody = {
   action: "check-in";
   userId: string;
+  checkInAt?: string;
 };
 
 type CheckOutBody = {
   action: "check-out";
   userId: string;
   note?: string;
+  checkOutAt?: string;
 };
 
 type UpdateNoteBody = {
@@ -20,6 +22,15 @@ type UpdateNoteBody = {
 
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Unexpected server error.";
+}
+
+function parseOptionalDate(value: unknown) {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    return null;
+  }
+
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
 export async function GET() {
@@ -61,7 +72,7 @@ export async function POST(request: Request) {
         );
       }
 
-      const now = new Date();
+      const now = parseOptionalDate(body.checkInAt) ?? new Date();
       const session = await prisma.timeSession.create({
         data: {
           id: crypto.randomUUID(),
@@ -98,10 +109,18 @@ export async function POST(request: Request) {
         );
       }
 
+      const checkOutAt = parseOptionalDate(body.checkOutAt) ?? new Date();
+      if (checkOutAt.getTime() < existing.checkInAt.getTime()) {
+        return NextResponse.json(
+          { error: "Check-out time cannot be earlier than check-in time." },
+          { status: 400 },
+        );
+      }
+
       const session = await prisma.timeSession.update({
         where: { id: existing.id },
         data: {
-          checkOutAt: new Date(),
+          checkOutAt,
           note: body.note?.trim() ?? "",
           updatedAt: new Date(),
         },
